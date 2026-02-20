@@ -1,33 +1,55 @@
-# AI Trading Agent
+import os
+import logging
+from telegram import Update
+from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes
+from dotenv import load_dotenv
 
+# 1. Jouw Trading Logica (De blauwdruk uit je screenshot)
 class TradingAgent:
     def __init__(self, balance=10000):
         self.balance = balance
         self.position = 0
 
-    def buy(self, price, quantity):
-        cost = price * quantity
-        if self.balance >= cost:
-            self.position += quantity
-            self.balance -= cost
-            print(f'Bought {quantity} units at {price} each.')
-        else:
-            print('Not enough balance to buy.')
-
-    def sell(self, price, quantity):
-        if self.position >= quantity:
-            revenue = price * quantity
-            self.position -= quantity
-            self.balance += revenue
-            print(f'Sold {quantity} units at {price} each.')
-        else:
-            print('Not enough position to sell.')
-
     def current_status(self):
         return self.balance, self.position
 
-# Example usage:
-# agent = TradingAgent()
-# agent.buy(100, 1)
-# agent.sell(110, 1)
-# print(agent.current_status())
+# 2. Setup & Beveiliging
+load_dotenv()
+TOKEN = os.getenv("TELEGRAM_TOKEN")
+OWNER_ID = int(os.getenv("OWNER_ID", "0"))
+
+logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
+
+# 3. De Bot Commando's
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    agent = TradingAgent()
+    balance, pos = agent.current_status()
+    await update.message.reply_text(
+        f"🛡️ **Synthora Core Online**\n\n"
+        f"Status: Geautoriseerd door de Architect\n"
+        f"Systeem Balans: ${balance}\n"
+        f"Actieve Posities: {pos}\n\n"
+        f"Wachtend op instructies voor het wekelijkse Skyline Report..."
+    )
+
+# Geheim commando (Alleen voor jou)
+async def skyline(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_user.id != OWNER_ID:
+        await update.message.reply_text("Toegang geweigerd. Dit protocol is alleen voor de Architect.")
+        return
+    await update.message.reply_text("📊 **Skyline Report** wordt gegenereerd... [Verbinding maken met Base netwerk]")
+
+# 4. De Server Starten
+if __name__ == '__main__':
+    if not TOKEN:
+        print("FOUT: Geen TELEGRAM_TOKEN gevonden!")
+    else:
+        # We bouwen de applicatie
+        app = ApplicationBuilder().token(TOKEN).build()
+        
+        # We voegen de 'luisteraars' toe
+        app.add_handler(CommandHandler('start', start))
+        app.add_handler(CommandHandler('skyline', skyline))
+        
+        print("Synthora luistert nu naar commando's...")
+        app.run_polling() # Dit houdt de bot 'aan' op Render
