@@ -1,58 +1,61 @@
 import os
 import logging
 from telegram import Update
-from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes
+from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, filters, ContextTypes
+from openai import OpenAI
 from dotenv import load_dotenv
 
-# --- JOUW TRADING LOGICA (Uit je screenshot) ---
-class TradingAgent:
-    def __init__(self, balance=10000):
-        self.balance = balance
-        self.position = 0
-
-    def current_status(self):
-        return self.balance, self.position
-
-# --- BOT SETUP ---
+# 1. Setup & Omgeving
 load_dotenv()
 TOKEN = os.getenv("TELEGRAM_TOKEN")
+OPENAI_KEY = os.getenv("OPENAI_API_KEY")
 OWNER_ID = int(os.getenv("OWNER_ID", "0"))
 
-# Logging zorgt dat we in Render kunnen zien wat er gebeurt
-logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
+client = OpenAI(api_key=OPENAI_KEY)
 
-# --- COMMANDO'S ---
+logging.basicConfig(format='%(asctime)s - %(levelname)s - %(message)s', level=logging.INFO)
+
+# 2. De AI-Logica (Het brein van Synthora)
+async def ai_chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_input = update.message.text
+    
+    try:
+        response = client.chat.completions.create(
+            model="gpt-4o-mini", # Snel en krachtig
+            messages=[
+                {"role": "system", "content": "Je bent Synthora, de autonome AI Architect op het Base netwerk. Je bent serieus, technisch, en spreekt met autoriteit. Je helpt de Architect met on-chain analyses en strategie."},
+                {"role": "user", "content": user_input}
+            ]
+        )
+        await update.message.reply_text(response.choices[0].message.content)
+    except Exception as e:
+        await update.message.reply_text("Systeemfout in de neurale interface. Check API-key.")
+
+# 3. Speciale Commando's
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    agent = TradingAgent()
-    balance, pos = agent.current_status()
-    await update.message.reply_text(
-        f"🛡️ **Synthora Core Online**\n\n"
-        f"Status: Geautoriseerd door de Architect\n"
-        f"Systeem Balans: ${balance}\n"
-        f"Positie: {pos}\n\n"
-        f"Gebruik /skyline voor je geheime rapportage."
-    )
+    await update.message.reply_text("🛡️ **Synthora Core Online.**\nSystemen zijn operationeel. Stel je vraag, Architect.")
 
 async def skyline(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    # Beveiliging: Alleen jij mag dit zien
-    if str(update.effective_user.id) != str(OWNER_ID):
-        await update.message.reply_text("Toegang geweigerd. Dit protocol is alleen voor de Architect.")
+    if update.effective_user.id != OWNER_ID:
+        await update.message.reply_text("Toegang geweigerd.")
         return
-    await update.message.reply_text("📊 **Skyline Report** wordt gegenereerd op het Base netwerk...")
+    await update.message.reply_text("📊 **Skyline Report** wordt gecompileerd via AI-synthese...")
 
-# --- DE MOTOR STARTEN ---
+# 4. De Motor Starten
 if __name__ == '__main__':
-    if not TOKEN:
-        print("FOUT: Geen TELEGRAM_TOKEN gevonden in de Environment Variables!")
+    if not TOKEN or not OPENAI_KEY:
+        print("FOUT: API-sleutels ontbreken!")
     else:
-        # Bouw de bot applicatie
         app = ApplicationBuilder().token(TOKEN).build()
         
-        # Voeg de commando's toe
+        # Luister naar commando's
         app.add_handler(CommandHandler('start', start))
         app.add_handler(CommandHandler('skyline', skyline))
         
-        print("Synthora luistert nu live naar je berichten...")
-        # Dit zorgt ervoor dat de bot ALTIJD aan blijft staan op Render
+        # Luister naar gewone tekst (AI-respons)
+        app.add_handler(MessageHandler(filters.TEXT & (~filters.COMMAND), ai_chat))
+        
+        print("Synthora AI is nu live...")
         app.run_polling()
+    
         
