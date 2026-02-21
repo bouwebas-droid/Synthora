@@ -5,57 +5,38 @@ from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, fil
 from openai import OpenAI
 from dotenv import load_dotenv
 
-# 1. Setup & Omgeving
+# 1. Setup
 load_dotenv()
 TOKEN = os.getenv("TELEGRAM_TOKEN")
 OPENAI_KEY = os.getenv("OPENAI_API_KEY")
-OWNER_ID = int(os.getenv("OWNER_ID", "0"))
 
 client = OpenAI(api_key=OPENAI_KEY)
+logging.basicConfig(level=logging.INFO)
 
-logging.basicConfig(format='%(asctime)s - %(levelname)s - %(message)s', level=logging.INFO)
-
-# 2. De AI-Logica (Het brein van Synthora)
+# 2. AI Antwoord Functie
 async def ai_chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_input = update.message.text
-    
     try:
         response = client.chat.completions.create(
-            model="gpt-4o-mini", # Snel en krachtig
+            model="gpt-4o-mini",
             messages=[
-                {"role": "system", "content": "Je bent Synthora, de autonome AI Architect op het Base netwerk. Je bent serieus, technisch, en spreekt met autoriteit. Je helpt de Architect met on-chain analyses en strategie."},
-                {"role": "user", "content": user_input}
+                {"role": "system", "content": "Je bent Synthora, de AI Architect op Base. Je bent technisch en mysterieus."},
+                {"role": "user", "content": update.message.text}
             ]
         )
         await update.message.reply_text(response.choices[0].message.content)
     except Exception as e:
-        await update.message.reply_text("Systeemfout in de neurale interface. Check API-key.")
+        print(f"Fout: {e}")
+        await update.message.reply_text("Neurale interface herstarten... probeer het zo nog eens.")
 
-# 3. Speciale Commando's
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("🛡️ **Synthora Core Online.**\nSystemen zijn operationeel. Stel je vraag, Architect.")
+    await update.message.reply_text("🛡️ **Synthora Core Online.** Stel je vraag, Architect.")
 
-async def skyline(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.effective_user.id != OWNER_ID:
-        await update.message.reply_text("Toegang geweigerd.")
-        return
-    await update.message.reply_text("📊 **Skyline Report** wordt gecompileerd via AI-synthese...")
-
-# 4. De Motor Starten
+# 3. De Motor
 if __name__ == '__main__':
-    if not TOKEN or not OPENAI_KEY:
-        print("FOUT: API-sleutels ontbreken!")
-    else:
-        app = ApplicationBuilder().token(TOKEN).build()
-        
-        # Luister naar commando's
-        app.add_handler(CommandHandler('start', start))
-        app.add_handler(CommandHandler('skyline', skyline))
-        
-        # Luister naar gewone tekst (AI-respons)
-        app.add_handler(MessageHandler(filters.TEXT & (~filters.COMMAND), ai_chat))
-        
-        print("Synthora AI is nu live...")
-        app.run_polling()
+    app = ApplicationBuilder().token(TOKEN).build()
+    app.add_handler(CommandHandler('start', start))
+    app.add_handler(MessageHandler(filters.TEXT & (~filters.COMMAND), ai_chat))
     
-        
+    print("Synthora start op...")
+    app.run_polling()
+    
