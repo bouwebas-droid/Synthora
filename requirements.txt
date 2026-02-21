@@ -1,7 +1,10 @@
+python-telegram-bot==20.8
+openai
+python-dotenv
+httpx
 pandas
 numpy
 scikit-learn
-
 
 
 
