@@ -2,3 +2,4 @@ python-telegram-bot
 langchain-openai
 coinbase-agentkit
 coinbase-agentkit-langchain
+
