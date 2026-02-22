@@ -1,71 +1,75 @@
 import os
-import logging
 import asyncio
+import logging
 from telegram import Update
 from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, filters, ContextTypes
 
-# --- LOGGING ---
-logging.basicConfig(
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    level=logging.INFO
-)
+# Lite imports: we laden alleen wat nodig is
+from langchain_openai import ChatOpenAI
+from coinbase_agentkit import AgentKit, AgentKitValues
+from coinbase_agentkit_langchain.utils import create_react_agent
+
+logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# --- HANDLERS ---
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text(
-        "👋 Welkom! Ik ben SYNTHORA.\n"
-        "Ik ben je AI Agent op Base.\n\n"
-        "/start — Dit bericht\n"
-        "/status — Bot status\n"
+# --- ARCHITECTUUR: LITE AI SETUP ---
+def setup_synthora():
+    # We gebruiken gpt-4o-mini: extreem snel en begrijpt alle talen
+    llm = ChatOpenAI(model="gpt-4o-mini", temperature=0.2)
+
+    # Wallet connectie met Base
+    agent_kit = AgentKit(AgentKitValues(
+        cdp_api_key_name=os.getenv("CDP_API_KEY_NAME"),
+        cdp_api_key_private_key=os.getenv("CDP_API_KEY_PRIVATE_KEY").replace('\\n', '\n'),
+        network_id="base-mainnet"
+    ))
+
+    # Meertalige instructies: Synthora past zich aan de gebruiker aan
+    system_instructions = (
+        "You are SYNTHORA, a high-speed AI Trading Agent on Base. "
+        "Always respond in the same language the user speaks. "
+        "Be technical, brief, and professional. No fluff."
     )
 
-async def status(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    # Hier kun je later checken of je CDP/Coinbase wallet geladen is
-    await update.message.reply_text("✅ SYNTHORA is actief en verbonden met Base.")
+    return create_react_agent(llm, agent_kit.get_tools(), state_modifier=system_instructions)
 
-async def handle_ai_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    # TODO: Hier koppelen we straks je OpenAI + AgentKit logica
+# Initialiseer de agent één keer bij het opstarten
+agent_executor = setup_synthora()
+
+# --- HANDLERS ---
+async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = str(update.effective_user.id)
     user_text = update.message.text
-    await update.message.reply_text(f"SYNTHORA denkt na over: {user_text}...")
 
-async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE):
-    logger.error("fout in bot:", exc_info=context.error)
+    # AI Track voor analyse en vragen
+    try:
+        # De agent handelt nu meertalig af
+        response = await agent_executor.ainvoke({"messages": [("user", user_text)]})
+        await update.message.reply_text(response["messages"][-1].content)
+    except Exception as e:
+        logger.error(f"Fout: {e}")
 
-# --- MAIN LOOP (Gecorrigeerd voor Render) ---
-async def main():
-    # LET OP: In je screenshot gebruik je TELEGRAM_BOT_TOKEN, niet TELEGRAM_TOKEN
-    TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN") 
-    
-    if not TOKEN:
-        logger.error("❌ TELEGRAM_BOT_TOKEN niet gevonden in Environment Variables!")
+# SECRET COMMAND: Alleen voor de eigenaar
+async def skyline(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if str(update.effective_user.id) != os.getenv("OWNER_ID"):
         return
+    await update.message.reply_text("📊 *Generating Weekly Skyline Report...*")
+    # Voer hier de specifieke Architect taak uit
 
-    # Bouw de applicatie
-    app = ApplicationBuilder().token(TOKEN).build()
+# --- RENDER STARTUP ---
+async def main():
+    app = ApplicationBuilder().token(os.getenv("TELEGRAM_BOT_TOKEN")).build()
 
-    # Handlers toevoegen
-    app.add_handler(CommandHandler('start', start))
-    app.add_handler(CommandHandler('status', status))
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_ai_message))
-    app.add_error_handler(error_handler)
+    app.add_handler(CommandHandler('skyline', skyline))
+    app.add_handler(MessageHandler(filters.TEXT & (~filters.COMMAND), handle_message))
 
-    # De asynchrone manier van opstarten om 'never awaited' warnings te voorkomen
-    await app.initialize()
+    await app.initialize() # Voorkomt de 'never awaited' error uit je logs
     await app.start()
-    
-    logger.info("🤖 SYNTHORA is live!")
-    
-    # Start polling handmatig
     await app.updater.start_polling(drop_pending_updates=True)
-
-    # Houdt de loop levend op Render
-    stop_event = asyncio.Event()
-    await stop_event.wait()
+    
+    logger.info("🤖 SYNTHORA LITE IS LIVE")
+    await asyncio.Event().wait()
 
 if __name__ == '__main__':
-    try:
-        asyncio.run(main())
-    except (KeyboardInterrupt, SystemExit):
-        logger.info("Bot wordt afgesloten...")
-        
+    asyncio.run(main())
+    
