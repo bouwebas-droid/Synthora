@@ -1,6 +1,8 @@
-import os
 import asyncio
 import logging
+import os
+import sys
+
 from telegram import Update
 from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, filters, ContextTypes
 
@@ -13,11 +15,17 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 # --- 1. CONFIGURATIE & BEVEILIGING ---
-# Dit zorgt dat de bot alleen naar JOU luistert voor trades
+# Valideer bij startup dat OWNER_ID is ingesteld
 OWNER_ID = os.getenv("OWNER_ID")
+if not OWNER_ID:
+    logger.critical("FATAL: OWNER_ID omgevingsvariabele is niet ingesteld. Bot weigert te starten.")
+    sys.exit(1)
+
+# agent_executor wordt pas aangemaakt in main(), niet op module-niveau
+agent_executor = None
 
 def setup_agent():
-    llm = ChatOpenAI(model="gpt-4o-mini", temperature=0) # Temp 0 voor precisie bij trades
+    llm = ChatOpenAI(model="gpt-4o-mini", temperature=0)  # Temp 0 voor precisie bij trades
 
     # Wallet setup voor Base Mainnet
     # De private keys worden veilig uit je Render Environment gehaald
@@ -34,7 +42,6 @@ def setup_agent():
 
     return create_react_agent(llm, agent_kit.get_tools(), state_modifier=instructions)
 
-agent_executor = setup_agent()
 
 # --- 2. BEVEILIGINGS CHECK ---
 def check_auth(update: Update):
@@ -44,12 +51,23 @@ def check_auth(update: Update):
         return False
     return True
 
+
 # --- 3. HANDLERS ---
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    auth_status = "✅ Architect Geautoriseerd" if check_auth(update) else "🔒 Publieke Modus (Kijken alleen)"
-    await update.message.reply_text(f"⚡ **SYNTHORA Engine Live**\nStatus: {auth_status}\n\nHoe kan ik je helpen op Base?")
+    if check_auth(update):
+        auth_status = "✅ Architect Geautoriseerd"
+        await update.message.reply_text(
+            f"⚡ **SYNTHORA Engine Live**\nStatus: {auth_status}\n\nHoe kan ik je helpen op Base?",
+            parse_mode="Markdown"
+        )
+    else:
+        # Geef onbevoegden geen info over de bot
+        await update.message.reply_text("⛔ Geen toegang.")
+
 
 async def handle_secure_trade(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    global agent_executor
+
     # De belangrijkste beveiliging: Alleen jij kunt trades uitvoeren
     if not check_auth(update):
         await update.message.reply_text("⛔ Fout: Alleen de eigenaar kan handelsopdrachten geven.")
@@ -62,11 +80,24 @@ async def handle_secure_trade(update: Update, context: ContextTypes.DEFAULT_TYPE
         await update.message.reply_text(response["messages"][-1].content)
     except Exception as e:
         logger.error(f"Trading Error: {e}")
-        await update.message.reply_text("Transactie kon niet worden voltooid. Controleer je saldo of CDP instellingen.")
+        # Stuur de echte foutmelding naar de eigenaar zodat je kunt debuggen
+        await update.message.reply_text(f"⚠️ Transactie mislukt:\n`{e}`", parse_mode="Markdown")
+
 
 # --- 4. RENDER STARTUP ---
 async def main():
+    global agent_executor
+
     token = os.getenv("TELEGRAM_BOT_TOKEN")
+    if not token:
+        logger.critical("FATAL: TELEGRAM_BOT_TOKEN is niet ingesteld.")
+        sys.exit(1)
+
+    # Agent wordt hier aangemaakt, niet op module-niveau
+    logger.info("Agent wordt opgestart...")
+    agent_executor = setup_agent()
+    logger.info("Agent succesvol opgestart.")
+
     app = ApplicationBuilder().token(token).build()
 
     app.add_handler(CommandHandler('start', start))
@@ -76,13 +107,11 @@ async def main():
     await app.initialize()
     await app.start()
     await app.updater.start_polling(drop_pending_updates=True)
-    
+
     logger.info("🤖 SYNTHORA IS LIVE EN BEVEILIGD")
     await asyncio.Event().wait()
 
+
 if __name__ == '__main__':
-    try:
-        asyncio.run(main())
-    except (KeyboardInterrupt, SystemExit):
-        pass
-        
+    asyncio.run(main())
+    
