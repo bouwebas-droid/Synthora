@@ -1,13 +1,4 @@
-python-telegram-bot==21.5
-openai
-python-dotenv
-httpx
-pandas
-numpy
-scikit-learn
-
-
-
-
-
-
+python-telegram-bot
+langchain-openai
+coinbase-agentkit
+coinbase-agentkit-langchain
