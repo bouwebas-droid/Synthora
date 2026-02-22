@@ -1,4 +1,4 @@
-import os
+    import os
 import asyncio
 import logging
 import sys
@@ -6,9 +6,10 @@ import sys
 from telegram import Update
 from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, filters, ContextTypes
 
-# Gecorrigeerde imports voor de nieuwste Coinbase SDK
+# Correcte imports voor de nieuwste Coinbase AgentKit SDK
 from coinbase_agentkit import AgentKit, AgentKitConfig
-from coinbase_agentkit_langchain.utils import create_react_agent
+from coinbase_agentkit_langchain import get_langchain_tools
+from langgraph.prebuilt import create_react_agent
 from langchain_openai import ChatOpenAI
 
 logging.basicConfig(level=logging.INFO)
@@ -16,13 +17,11 @@ logger = logging.getLogger(__name__)
 
 # --- CONFIGURATIE ---
 # OWNER_ID en agent worden pas geladen in main(), NIET op module-niveau
-# Dit voorkomt stille crashes bij Render startup
 OWNER_ID = None
 agent_executor = None
 
 
 def setup_synthora():
-    # Gebruik gpt-4o-mini voor maximale snelheid op Render
     llm = ChatOpenAI(model="gpt-4o-mini", temperature=0)
 
     # Wallet setup (Base Mainnet) - keys komen uit Render Environment Variables
@@ -30,7 +29,10 @@ def setup_synthora():
         network_id="base-mainnet"
     ))
 
-    # Instructies voor de bot
+    # Haal de tools op via de correcte methode
+    tools = get_langchain_tools(agent_kit)
+
+    # Instructies voor SYNTHORA
     instructions = (
         "Je bent SYNTHORA, een high-speed trading agent op Base. "
         "Jouw doel is het verhandelen van de token van de Architect. "
@@ -38,7 +40,11 @@ def setup_synthora():
         "Reageer altijd in de taal van de gebruiker (NL/EN)."
     )
 
-    return create_react_agent(llm, agent_kit.get_tools(), state_modifier=instructions)
+    return create_react_agent(
+        model=llm,
+        tools=tools,
+        prompt=instructions
+    )
 
 
 # --- BEVEILIGING ---
@@ -55,26 +61,22 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
             parse_mode="Markdown"
         )
     else:
-        # Geef onbevoegden geen info over de bot
         await update.message.reply_text("⛔ Geen toegang.")
 
 
 async def handle_trading(update: Update, context: ContextTypes.DEFAULT_TYPE):
     global agent_executor
 
-    # De belangrijkste check: alleen jij mag traden
     if not is_architect(update):
         await update.message.reply_text("⛔ Toegang geweigerd. Alleen de Architect kan trades uitvoeren.")
         return
 
     try:
         user_msg = update.message.text
-        # De AI koppelt je bericht aan de Coinbase Trade Tool
         response = await agent_executor.ainvoke({"messages": [("user", user_msg)]})
         await update.message.reply_text(response["messages"][-1].content)
     except Exception as e:
         logger.error(f"Trading Error: {e}")
-        # Stuur de echte fout naar jou zodat je kunt debuggen
         await update.message.reply_text(f"⚠️ Transactie mislukt:\n`{e}`", parse_mode="Markdown")
 
 
@@ -83,9 +85,8 @@ async def skyline(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_architect(update):
         return
 
-    await update.message.reply_text("📊 **Skyline Report** wordt gegenereerd via ML Engine...", parse_mode="Markdown")
+    await update.message.reply_text("📊 **Skyline Report** wordt gegenereerd...", parse_mode="Markdown")
     try:
-        # Gebruik dezelfde messages-structuur als de rest van de code
         res = await agent_executor.ainvoke({
             "messages": [("user", "Geef een technisch marktbericht voor Base op basis van huidige trends.")]
         })
@@ -99,7 +100,6 @@ async def skyline(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def main():
     global agent_executor, OWNER_ID
 
-    # Valideer omgevingsvariabelen HIER, niet op module-niveau
     OWNER_ID = os.getenv("OWNER_ID")
     if not OWNER_ID:
         logger.critical("FATAL: OWNER_ID is niet ingesteld in Render Environment Variables.")
@@ -110,19 +110,16 @@ async def main():
         logger.critical("FATAL: TELEGRAM_BOT_TOKEN is niet ingesteld in Render Environment Variables.")
         sys.exit(1)
 
-    # Agent wordt hier aangemaakt, NIET op module-niveau
     logger.info("Agent wordt opgestart...")
     agent_executor = setup_synthora()
     logger.info("Agent succesvol opgestart.")
 
     app = ApplicationBuilder().token(token).build()
 
-    # Handlers
     app.add_handler(CommandHandler('start', start))
     app.add_handler(CommandHandler('skyline', skyline))
     app.add_handler(MessageHandler(filters.TEXT & (~filters.COMMAND), handle_trading))
 
-    # Fix voor 'initialize was never awaited' op Render
     await app.initialize()
     await app.start()
     await app.updater.start_polling(drop_pending_updates=True)
@@ -136,3 +133,4 @@ if __name__ == '__main__':
         asyncio.run(main())
     except (KeyboardInterrupt, SystemExit):
         logger.info("SYNTHORA afgesloten.")
+    
