@@ -1,86 +1,76 @@
-# -import os
+import os
 import asyncio
 import logging
 from telegram import Update
 from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, filters, ContextTypes
 
-# Essentiële AI & Blockchain imports
-from langchain_openai import ChatOpenAI
-from coinbase_agentkit import AgentKit, AgentKitValues
+# Stabiele imports voor Wallet & AI
+from coinbase_agentkit import AgentKit, AgentKitConfig
 from coinbase_agentkit_langchain.utils import create_react_agent
+from langchain_openai import ChatOpenAI
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# --- CONFIGURATIE ---
+# --- 1. VEILIGE WALLET SETUP ---
 def setup_synthora():
-    # Razendsnel brein (GPT-4o-mini) voor meertaligheid
-    llm = ChatOpenAI(model="gpt-4o-mini", temperature=0.1)
-    
-    # Verbinding met de Base Wallet via CDP
-    agent_kit = AgentKit(AgentKitValues(
-        cdp_api_key_name=os.getenv("CDP_API_KEY_NAME"),
-        cdp_api_key_private_key=os.getenv("CDP_API_KEY_PRIVATE_KEY").replace('\\n', '\n'),
+    llm = ChatOpenAI(model="gpt-4o-mini", temperature=0)
+
+    # De bot haalt je CDP keys veilig uit de Render omgeving
+    agent_kit = AgentKit(AgentKitConfig(
         network_id="base-mainnet"
     ))
 
-    # De instructies voor jouw token agent
-    system_instructions = (
-        "Je bent SYNTHORA, de officiële AI Trading Agent op de Base blockchain. "
-        "Je bent professioneel, technisch en reageert ALTIJD in de taal van de gebruiker. "
-        "Je kunt saldi checken, tokens swappen en prijsinformatie geven. "
-        "Help de gebruiker om succesvol te handelen op Base."
+    # Instructies voor de bot (Trade focus)
+    instructions = (
+        "Je bent SYNTHORA. Je beheert een wallet op Base Mainnet. "
+        "Je voert swaps en trades uit wanneer de geautoriseerde eigenaar dat vraagt. "
+        "Wees uiterst precies met getallen en bedragen."
     )
 
-    return create_react_agent(llm, agent_kit.get_tools(), state_modifier=system_instructions)
+    return create_react_agent(llm, agent_kit.get_tools(), state_modifier=instructions)
 
-# Initialiseer de engine
 agent_executor = setup_synthora()
 
-# --- HANDLERS ---
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text(
-        "⚡ **SYNTHORA Engine Live**\n\n"
-        "Ik ben je AI-agent op Base. Je kunt me vragen stellen over de markt, "
-        "je balans checken of direct tokens swappen.\n\n"
-        "Probeer: 'Wat is mijn balans?' of 'Hoe staat ETH ervoor?'"
-    )
+# --- 2. BEVEILIGINGSFILTER ---
+def is_owner(update: Update):
+    # Controleert of het bericht van jouw Telegram ID komt
+    return str(update.effective_user.id) == os.getenv("OWNER_ID")
 
-async def handle_ai_trading(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    # Dit is het hart van de bot: koppelt tekst aan blockchain acties
+# --- 3. HANDLERS MET BEVEILIGING ---
+async def handle_secure_trade(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # Alleen de eigenaar kan traden
+    if not is_owner(update):
+        await update.message.reply_text("⛔ Toegang geweigerd. Alleen de Architect kan trades uitvoeren.")
+        return
+
     try:
         user_input = update.message.text
-        # De AI bepaalt of het een vraag is of een handelsopdracht
+        # Voer de trade uit via de AI en Wallet integratie
         response = await agent_executor.ainvoke({"messages": [("user", user_input)]})
         await update.message.reply_text(response["messages"][-1].content)
     except Exception as e:
-        logger.error(f"Engine Error: {e}")
-        await update.message.reply_text("Ik ondervind momenteel hinder bij het ophalen van Base-data.")
+        logger.error(f"Trading Fout: {e}")
+        await update.message.reply_text("De transactie kon niet worden voltooid op Base.")
 
-# SECRET ARCHITECT COMMAND: Skyline Report
-async def skyline(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    # Beveiliging: Alleen voor de eigenaar
-    if str(update.effective_user.id) == os.getenv("OWNER_ID"):
-        await update.message.reply_text("📊 **Architect geïdentificeerd.** Skyline Report wordt gegenereerd...")
-        res = await agent_executor.ainvoke({"input": "Genereer een wekelijks rapport over wallet activiteit en token prestaties."})
-        await update.message.reply_text(res["messages"][-1].content)
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    status = "Beveiligd (Architect Mode)" if is_owner(update) else "Public Mode"
+    await update.message.reply_text(f"⚡ **SYNTHORA v2.0 Live**\nStatus: {status}\n\nGeef een handelsopdracht op Base.")
 
-# --- DE STABIELE BOOTSTRAP (FIX VOOR RENDER) ---
+# --- 4. STARTUP ---
 async def main():
     token = os.getenv("TELEGRAM_BOT_TOKEN")
     app = ApplicationBuilder().token(token).build()
 
-    # Registreer handlers
     app.add_handler(CommandHandler('start', start))
-    app.add_handler(CommandHandler('skyline', skyline))
-    app.add_handler(MessageHandler(filters.TEXT & (~filters.COMMAND), handle_ai_trading))
+    # Alle tekstberichten gaan door de beveiligde handelsfilter
+    app.add_handler(MessageHandler(filters.TEXT & (~filters.COMMAND), handle_secure_trade))
 
-    # Cruciaal: wacht op volledige startup voor Render stabiliteit
     await app.initialize()
     await app.start()
     await app.updater.start_polling(drop_pending_updates=True)
     
-    logger.info("🤖 SYNTHORA IS LIVE")
+    logger.info("🤖 SYNTHORA SECURE ENGINE LIVE")
     await asyncio.Event().wait()
 
 if __name__ == '__main__':
