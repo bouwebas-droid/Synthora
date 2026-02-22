@@ -1,12 +1,10 @@
-import os
+# -import os
 import asyncio
 import logging
-import pandas as pd
-import numpy as np
 from telegram import Update
 from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, filters, ContextTypes
 
-# AI & Blockchain
+# Essentiële AI & Blockchain imports
 from langchain_openai import ChatOpenAI
 from coinbase_agentkit import AgentKit, AgentKitValues
 from coinbase_agentkit_langchain.utils import create_react_agent
@@ -14,71 +12,75 @@ from coinbase_agentkit_langchain.utils import create_react_agent
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# --- INTEGRATIE VAN JE ANALYSE SCRIPT ---
-def run_ml_prediction():
-    # Hier kun je later je RandomForest logica uit technical_analysis.py aanroepen
-    # Voor nu een snelle placeholder die laat zien dat de engine werkt
-    return "📈 ML Predictie: Bullish trend gedetecteerd op 15m timeframe."
-
-# --- ENGINE SETUP ---
+# --- CONFIGURATIE ---
 def setup_synthora():
-    # Gebruik gpt-4o-mini voor snelheid
+    # Razendsnel brein (GPT-4o-mini) voor meertaligheid
     llm = ChatOpenAI(model="gpt-4o-mini", temperature=0.1)
     
-    # Wallet configuratie (Base Mainnet)
+    # Verbinding met de Base Wallet via CDP
     agent_kit = AgentKit(AgentKitValues(
         cdp_api_key_name=os.getenv("CDP_API_KEY_NAME"),
         cdp_api_key_private_key=os.getenv("CDP_API_KEY_PRIVATE_KEY").replace('\\n', '\n'),
         network_id="base-mainnet"
     ))
 
-    # De AI weet nu dat hij ML kan gebruiken
-    instructions = (
-        "Je bent SYNTHORA, een geavanceerde AI Trading Agent op Base. "
-        "Je hebt toegang tot RandomForest ML voorspellingen. "
-        "Reageer altijd in de taal van de gebruiker. Wees technisch maar behulpzaam."
+    # De instructies voor jouw token agent
+    system_instructions = (
+        "Je bent SYNTHORA, de officiële AI Trading Agent op de Base blockchain. "
+        "Je bent professioneel, technisch en reageert ALTIJD in de taal van de gebruiker. "
+        "Je kunt saldi checken, tokens swappen en prijsinformatie geven. "
+        "Help de gebruiker om succesvol te handelen op Base."
     )
-    return create_react_agent(llm, agent_kit.get_tools(), state_modifier=instructions)
 
-# Agent eenmalig laden
+    return create_react_agent(llm, agent_kit.get_tools(), state_modifier=system_instructions)
+
+# Initialiseer de engine
 agent_executor = setup_synthora()
 
 # --- HANDLERS ---
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
-        "💪 Welkom Architect! SYNTHORA Engine v2.0 is online.\n\n"
-        "Ik ben verbonden met Base en je ML-modellen.\n"
-        "Stuur een bericht om te beginnen."
+        "⚡ **SYNTHORA Engine Live**\n\n"
+        "Ik ben je AI-agent op Base. Je kunt me vragen stellen over de markt, "
+        "je balans checken of direct tokens swappen.\n\n"
+        "Probeer: 'Wat is mijn balans?' of 'Hoe staat ETH ervoor?'"
     )
 
-async def handle_ai(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def handle_ai_trading(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # Dit is het hart van de bot: koppelt tekst aan blockchain acties
     try:
-        user_msg = update.message.text
-        # De AI handelt nu ALLES af: vragen, trades en analyses
-        response = await agent_executor.ainvoke({"messages": [("user", user_msg)]})
+        user_input = update.message.text
+        # De AI bepaalt of het een vraag is of een handelsopdracht
+        response = await agent_executor.ainvoke({"messages": [("user", user_input)]})
         await update.message.reply_text(response["messages"][-1].content)
     except Exception as e:
-        logger.error(f"Fout: {e}")
-        await update.message.reply_text("Engine herstart... probeer het over een moment opnieuw.")
+        logger.error(f"Engine Error: {e}")
+        await update.message.reply_text("Ik ondervind momenteel hinder bij het ophalen van Base-data.")
 
-async def status(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    prediction = run_ml_prediction()
-    await update.message.reply_text(f"⚡ Status: Optimaal\nNetwork: Base Mainnet\n{prediction}")
+# SECRET ARCHITECT COMMAND: Skyline Report
+async def skyline(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # Beveiliging: Alleen voor de eigenaar
+    if str(update.effective_user.id) == os.getenv("OWNER_ID"):
+        await update.message.reply_text("📊 **Architect geïdentificeerd.** Skyline Report wordt gegenereerd...")
+        res = await agent_executor.ainvoke({"input": "Genereer een wekelijks rapport over wallet activiteit en token prestaties."})
+        await update.message.reply_text(res["messages"][-1].content)
 
-# --- RENDER STABILITEIT ---
+# --- DE STABIELE BOOTSTRAP (FIX VOOR RENDER) ---
 async def main():
     token = os.getenv("TELEGRAM_BOT_TOKEN")
     app = ApplicationBuilder().token(token).build()
 
+    # Registreer handlers
     app.add_handler(CommandHandler('start', start))
-    app.add_handler(CommandHandler('status', status))
-    app.add_handler(MessageHandler(filters.TEXT & (~filters.COMMAND), handle_ai))
+    app.add_handler(CommandHandler('skyline', skyline))
+    app.add_handler(MessageHandler(filters.TEXT & (~filters.COMMAND), handle_ai_trading))
 
+    # Cruciaal: wacht op volledige startup voor Render stabiliteit
     await app.initialize()
     await app.start()
     await app.updater.start_polling(drop_pending_updates=True)
     
-    logger.info("🤖 SYNTHORA MASTER ENGINE LIVE")
+    logger.info("🤖 SYNTHORA IS LIVE")
     await asyncio.Event().wait()
 
 if __name__ == '__main__':
