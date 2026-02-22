@@ -2,4 +2,6 @@ python-telegram-bot
 langchain-openai
 coinbase-agentkit
 coinbase-agentkit-langchain
-
+pandas
+numpy
+scikit-learn
