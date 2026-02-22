@@ -26,6 +26,7 @@ agent_executor = None
 
 def setup_synthora():
     """Initialiseert de trading agent + wallet + tools."""
+
     # Check CDP environment variables
     required_env = ["CDP_API_KEY_ID", "CDP_API_KEY_SECRET", "CDP_WALLET_SECRET"]
     for var in required_env:
