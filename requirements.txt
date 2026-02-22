@@ -4,3 +4,5 @@ coinbase-agentkit-langchain
 langgraph
 langchain-openai
 langchain-core
+fastapi
+uvicorn
