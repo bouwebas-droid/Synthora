@@ -14,15 +14,12 @@ from langchain_openai import ChatOpenAI
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# --- 1. CONFIGURATIE & BEVEILIGING ---
-# Valideer bij startup dat OWNER_ID is ingesteld
-OWNER_ID = os.getenv("OWNER_ID")
-if not OWNER_ID:
-    logger.critical("FATAL: OWNER_ID omgevingsvariabele is niet ingesteld. Bot weigert te starten.")
-    sys.exit(1)
-
-# agent_executor wordt pas aangemaakt in main(), niet op module-niveau
+# --- 1. CONFIGURATIE ---
+# OWNER_ID en TOKEN worden pas gevalideerd in main(), NIET op module-niveau
+# Zo crasht Render niet bij het importeren van het bestand
+OWNER_ID = None
 agent_executor = None
+
 
 def setup_agent():
     llm = ChatOpenAI(model="gpt-4o-mini", temperature=0)  # Temp 0 voor precisie bij trades
@@ -55,9 +52,8 @@ def check_auth(update: Update):
 # --- 3. HANDLERS ---
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if check_auth(update):
-        auth_status = "✅ Architect Geautoriseerd"
         await update.message.reply_text(
-            f"⚡ **SYNTHORA Engine Live**\nStatus: {auth_status}\n\nHoe kan ik je helpen op Base?",
+            "⚡ **SYNTHORA Engine Live**\nStatus: ✅ Architect Geautoriseerd\n\nHoe kan ik je helpen op Base?",
             parse_mode="Markdown"
         )
     else:
@@ -80,17 +76,23 @@ async def handle_secure_trade(update: Update, context: ContextTypes.DEFAULT_TYPE
         await update.message.reply_text(response["messages"][-1].content)
     except Exception as e:
         logger.error(f"Trading Error: {e}")
-        # Stuur de echte foutmelding naar de eigenaar zodat je kunt debuggen
+        # Stuur de echte foutmelding naar jou zodat je kunt debuggen
         await update.message.reply_text(f"⚠️ Transactie mislukt:\n`{e}`", parse_mode="Markdown")
 
 
 # --- 4. RENDER STARTUP ---
 async def main():
-    global agent_executor
+    global agent_executor, OWNER_ID
+
+    # Valideer omgevingsvariabelen HIER, niet op module-niveau
+    OWNER_ID = os.getenv("OWNER_ID")
+    if not OWNER_ID:
+        logger.critical("FATAL: OWNER_ID is niet ingesteld in Render Environment Variables.")
+        sys.exit(1)
 
     token = os.getenv("TELEGRAM_BOT_TOKEN")
     if not token:
-        logger.critical("FATAL: TELEGRAM_BOT_TOKEN is niet ingesteld.")
+        logger.critical("FATAL: TELEGRAM_BOT_TOKEN is niet ingesteld in Render Environment Variables.")
         sys.exit(1)
 
     # Agent wordt hier aangemaakt, niet op module-niveau
@@ -113,5 +115,8 @@ async def main():
 
 
 if __name__ == '__main__':
-    asyncio.run(main())
-    
+    try:
+        asyncio.run(main())
+    except (KeyboardInterrupt, SystemExit):
+        logger.info("SYNTHORA afgesloten.")
+        
