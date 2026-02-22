@@ -37,13 +37,7 @@ def is_architect(update: Update):
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if is_architect(update):
-        await update.message.reply_text(
-            "Synthora Engine Live
-Status: Architect Toegang
-
-Ik ben klaar voor trading orders op Base.",
-            parse_mode="Markdown"
-        )
+        await update.message.reply_text("SYNTHORA Engine Live\nStatus: Architect Toegang\n\nIk ben klaar voor trading orders op Base.")
     else:
         await update.message.reply_text("Geen toegang.")
 
