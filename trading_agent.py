@@ -1,98 +1,69 @@
-# --- 1. DE FUNDERING: IMPORTS ---
-import logging
-import os
-import asyncio
-from fastapi import FastAPI
-import uvicorn
-from web3 import Web3
-from eth_account import Account
-from telegram import Update
-from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes
-from langchain_openai import ChatOpenAI
+# --- NIEUWE IMPORTS VOOR TRADING ---
+import json
 
-# --- CONFIGURATIE & BEVEILIGING ---
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger("Synthora")
+# Aerodrome Router Adres op Base (Mainnet)
+AERODROME_ROUTER = "0xcF77a3Ba9A5CA399B7c97c74d54e5b1Beb874E43"
+WETH_ADDRESS = "0x4200000000000000000000000000000000000006"
 
-BASE_RPC_URL = "https://mainnet.base.org"
-w3 = Web3(Web3.HTTPProvider(BASE_RPC_URL))
+# Minimale ABI voor een swap
+ROUTER_ABI = [
+    {"inputs":[{"name":"amountOutMin","type":"uint256"},{"name":"routes","type":"tuple[]","components":[{"name":"from","type":"address"},{"name":"to","type":"address"},{"name":"stable","type":"bool"},{"name":"factory","type":"address"}]},{"name":"to","type":"address"},{"name":"deadline","type":"uint256"}],"name":"swapExactETHForTokens","outputs":[{"name":"amounts","type":"uint256[]"}],"stateMutability":"payable","type":"function"}
+]
 
-OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY")
-TELEGRAM_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
-OWNER_ID = int(os.environ.get("OWNER_ID", 0))
+# --- 2. DE TRADE LOGICA ---
 
-# Jouw apart beveiligde wallet laden
-private_key = os.environ.get("ARCHITECT_SESSION_KEY")
-if private_key:
-    architect_account = Account.from_key(private_key)
-    logger.info(f"🏗️ Architect geladen op adres: {architect_account.address}")
-else:
-    architect_account = None
-    logger.error("❌ GEEN ARCHITECT_SESSION_KEY GEVONDEN!")
-
-# AI Hersenen initialiseren
-llm = ChatOpenAI(model="gpt-4o", api_key=OPENAI_API_KEY)
-
-# --- 2. DE ARCHITECT LOGICA ---
-
-
-
-async def generate_skyline_report():
-    """Genereert een on-chain analyse van de Skyline."""
-    gas_price = w3.from_wei(w3.eth.gas_price, 'gwei')
-    block = w3.eth.block_number
-    balance = w3.from_wei(w3.eth.get_balance(architect_account.address), 'ether') if architect_account else 0
+async def execute_swap_eth_to_token(token_to_buy, amount_in_eth):
+    """Voert een directe swap uit van ETH naar een opgegeven token."""
+    amount_in_wei = w3.to_wei(amount_in_eth, 'ether')
+    router = w3.eth.contract(address=AERODROME_ROUTER, abi=ROUTER_ABI)
     
-    # AI-interpretatie van de status
-    prompt = f"Je bent de Synthora Architect. Status: Block {block}, Gas {gas_price:.2f} Gwei, Wallet {balance:.4f} ETH. Schrijf een kort, krachtig wekelijks rapport over de skyline van Base."
-    response = llm.invoke(prompt)
-    return response.content
+    # Route: ETH (WETH) -> Target Token (Volatile swap)
+    route = [{"from": WETH_ADDRESS, "to": w3.to_checksum_address(token_to_buy), "stable": False, "factory": "0x4200000000000000000000000000000000000001"}]
+    
+    nonce = w3.eth.get_transaction_count(architect_account.address)
+    
+    # Transactie bouwen
+    tx = router.functions.swapExactETHForTokens(
+        0, # amountOutMin: Voor nu 0 voor test, later AI-berekend
+        route,
+        architect_account.address,
+        int(time.time()) + 600
+    ).build_transaction({
+        'from': architect_account.address,
+        'value': amount_in_wei,
+        'gas': 250000,
+        'gasPrice': w3.eth.gas_price,
+        'nonce': nonce,
+        'chainId': 8453 # Base Mainnet
+    })
+    
+    signed_tx = w3.eth.account.sign_transaction(tx, os.environ.get("ARCHITECT_SESSION_KEY"))
+    tx_hash = w3.eth.send_raw_transaction(signed_tx.rawTransaction)
+    return w3.to_hex(tx_hash)
 
-# --- 3. SECRET COMMANDS (OWNER ONLY) ---
+# --- 3. HET SECRET COMMAND: /trade ---
 
-async def skyline_report_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Secret Command: /skyline_report"""
+async def trade_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Gebruik: /trade [token_adres] [hoeveelheid_eth]"""
     if update.effective_user.id != OWNER_ID: return
-    
-    await update.message.reply_text("📊 **Secret Command geactiveerd: Skyline Report genereren...**")
-    report = await generate_skyline_report()
-    await update.message.reply_text(f"📝 **WEKELIJKS SKYLINE RAPPORT**\n\n{report}", parse_mode='Markdown')
 
-async def vault_check_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Secret Command: /vault - Directe wallet inspectie"""
-    if update.effective_user.id != OWNER_ID: return
-    
-    bal = w3.from_wei(w3.eth.get_balance(architect_account.address), 'ether') if architect_account else 0
-    await update.message.reply_text(f"🔐 **Vault Status**\nAdres: `{architect_account.address}`\nBalans: `{bal:.5f} ETH`", parse_mode='Markdown')
+    if len(context.args) < 2:
+        await update.message.reply_text("Geef data op: `/trade [token_adres] [eth_hoeveelheid]`")
+        return
 
-# --- 4. DE RUNNER ---
+    token_addr = context.args[0]
+    amount_eth = float(context.args[1])
 
-async def run_telegram_bot():
-    if not TELEGRAM_TOKEN: return
-    application = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
-    
-    # Publieke commando's
-    application.add_handler(CommandHandler("start", lambda u, c: u.message.reply_text("Synthora Architect Online.")))
-    
-    # Secret Commands (Alleen zichtbaar/bruikbaar voor jou)
-    application.add_handler(CommandHandler("skyline_report", skyline_report_command))
-    application.add_handler(CommandHandler("vault", vault_check_command))
-    
-    await application.initialize()
-    await application.start()
-    await application.updater.start_polling()
-    logger.info("🚀 De Architect luistert...")
-    while True: await asyncio.sleep(3600)
+    await update.message.reply_text(f"🚀 **De Architect voert trade uit op Base...**\nInvoer: `{amount_eth} ETH` -> `{token_addr[:10]}...`")
 
-app = FastAPI()
-@app.get("/")
-async def health(): return {"status": "live", "agent": "Synthora"}
-
-@app.on_event("startup")
-async def startup():
-    asyncio.create_task(run_telegram_bot())
-
-if __name__ == "__main__":
-    port = int(os.environ.get("PORT", 10000))
-    uvicorn.run(app, host="0.0.0.0", port=port)
-    
+    try:
+        tx_hash = await execute_swap_eth_to_token(token_addr, amount_eth)
+        await update.message.reply_text(
+            f"✅ **Trade Geslaagd!**\n"
+            f"🔗 View on Basescan: [Hier](https://basescan.org/tx/{tx_hash})",
+            parse_mode='Markdown'
+        )
+    except Exception as e:
+        logger.error(f"Trade Error: {e}")
+        await update.message.reply_text(f"❌ **Trade Mislukt:** {str(e)}")
+        
