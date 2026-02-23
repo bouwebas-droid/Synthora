@@ -4,6 +4,7 @@ import httpx
 from web3 import Web3
 from eth_account import Account
 from eth_account.messages import encode_defunct
+from eth_abi import encode
 from telegram import Update
 from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes
 from langchain_openai import ChatOpenAI
@@ -17,7 +18,7 @@ logger = logging.getLogger("Synthora")
 BASE_RPC_URL = "https://mainnet.base.org"
 w3 = Web3(Web3.HTTPProvider(BASE_RPC_URL))
 
-# Pimlico & ERC-4337 Adressen
+# Pimlico & ERC-4337 Adressen (Base Network - Chain ID 8453)
 PIMLICO_API_KEY = os.environ.get("PIMLICO_API_KEY", "")
 BUNDLER_URL = f"https://api.pimlico.io/v2/8453/rpc?apikey={PIMLICO_API_KEY}"
 PAYMASTER_URL = BUNDLER_URL
@@ -55,7 +56,36 @@ ACCOUNT_ABI = [{"inputs":[{"name":"dest","type":"address"},{"name":"value","type
 FACTORY_ABI = [{"inputs":[{"name":"owner","type":"address"},{"name":"salt","type":"uint256"}],"name":"getAddress","outputs":[{"name":"","type":"address"}],"stateMutability":"view","type":"function"},
                {"inputs":[{"name":"owner","type":"address"},{"name":"salt","type":"uint256"}],"name":"createAccount","outputs":[{"name":"","type":"address"}],"stateMutability":"nonpayable","type":"function"}]
 
-# --- 2. ERC-4337 SMART VAULT & PIMLICO ENGINE ---
+# --- 2. ERC-4337 SMART VAULT & CRYPTOGRAFIE ENGINE ---
+
+def get_user_op_hash(op, entry_point, chain_id):
+    """Berekent de wiskundige hash van de UserOperation volgens ERC-4337 v0.6."""
+    hashed_init_code = w3.keccak(hexstr=op.get('initCode', '0x'))
+    hashed_call_data = w3.keccak(hexstr=op.get('callData', '0x'))
+    hashed_paymaster_and_data = w3.keccak(hexstr=op.get('paymasterAndData', '0x'))
+
+    user_op_encoded = encode(
+        ['address', 'uint256', 'bytes32', 'bytes32', 'uint256', 'uint256', 'uint256', 'uint256', 'uint256', 'bytes32'],
+        [
+            w3.to_checksum_address(op['sender']),
+            int(op.get('nonce', '0x0'), 16),
+            hashed_init_code,
+            hashed_call_data,
+            int(op.get('callGasLimit', '0x0'), 16),
+            int(op.get('verificationGasLimit', '0x0'), 16),
+            int(op.get('preVerificationGas', '0x0'), 16),
+            int(op.get('maxFeePerGas', '0x0'), 16),
+            int(op.get('maxPriorityFeePerGas', '0x0'), 16),
+            hashed_paymaster_and_data
+        ]
+    )
+    user_op_hash = w3.keccak(user_op_encoded)
+    
+    enc = encode(
+        ['bytes32', 'address', 'uint256'],
+        [user_op_hash, w3.to_checksum_address(entry_point), chain_id]
+    )
+    return w3.keccak(enc)
 
 async def get_smart_vault_address():
     if not architect_signer: return None
@@ -67,31 +97,33 @@ async def get_smart_vault_address():
         return None
 
 async def send_user_operation(call_data, to_address, value=0, is_batch=False):
-    """Bouwt, sponsort, ondertekent en verstuurt een UserOperation naar Pimlico."""
+    """Bouwt, sponsort, ondertekent (cryptografisch) en verstuurt een UserOperation."""
     vault_address = await get_smart_vault_address()
     if not vault_address: raise Exception("Smart Vault adres niet gevonden.")
 
     init_code = "0x"
-    # Als het contract nog niet bestaat, bereid de deployment voor in dezelfde actie
     if w3.eth.get_code(vault_address) == b'':
         factory_contract = w3.eth.contract(address=SIMPLE_ACCOUNT_FACTORY, abi=FACTORY_ABI)
         init_calldata = factory_contract.encode_abi("createAccount", args=[architect_signer.address, 0])
         init_code = SIMPLE_ACCOUNT_FACTORY + init_calldata[2:]
 
     account_contract = w3.eth.contract(address=vault_address, abi=ACCOUNT_ABI)
-    
-    if is_batch:
-        encoded_execute = call_data 
-    else:
-        encoded_execute = account_contract.encode_abi("execute", args=[to_address, value, call_data])
+    encoded_execute = call_data if is_batch else account_contract.encode_abi("execute", args=[to_address, value, call_data])
 
-    # Gas data ophalen op Base
     actuele_gas_prijs = w3.eth.gas_price
     priority_fee = w3.to_wei(0.001, 'gwei')
 
+    # Haal de échte on-chain nonce op van het EntryPoint contract
+    ep_abi = [{"inputs":[{"name":"sender","type":"address"},{"name":"key","type":"uint192"}],"name":"getNonce","outputs":[{"name":"nonce","type":"uint256"}],"stateMutability":"view","type":"function"}]
+    entry_point_contract = w3.eth.contract(address=ENTRY_POINT_ADDRESS, abi=ep_abi)
+    try:
+        current_nonce = entry_point_contract.functions.getNonce(vault_address, 0).call()
+    except Exception:
+        current_nonce = 0
+
     user_op = {
         "sender": vault_address,
-        "nonce": hex(0), 
+        "nonce": hex(current_nonce), 
         "initCode": init_code,
         "callData": encoded_execute,
         "callGasLimit": "0x1",          
@@ -104,20 +136,21 @@ async def send_user_operation(call_data, to_address, value=0, is_batch=False):
     }
 
     async with httpx.AsyncClient() as client:
-        # 1. Vraag Paymaster om sponsoring (vult de gas parameters definitief in)
+        # 1. Sponsor via Paymaster
         sponsor_payload = {"jsonrpc": "2.0", "id": 1, "method": "pm_sponsorUserOperation", "params": [user_op, ENTRY_POINT_ADDRESS]}
         sponsor_res = await client.post(PAYMASTER_URL, json=sponsor_payload)
         
         if sponsor_res.status_code != 200 or "error" in sponsor_res.json():
-            logger.error(f"Pimlico sponsoring faalde: {sponsor_res.json()}")
-            raise Exception(f"Paymaster Fout: {sponsor_res.json().get('error', 'Onbekend')}")
+            raise Exception(f"Paymaster Fout: {sponsor_res.json()}")
             
         user_op.update(sponsor_res.json()["result"])
 
-        # 2. Dummy Signature voor deze bot structuur
-        user_op["signature"] = architect_signer.sign_message(encode_defunct(text="DummyForNow")).signature.hex()
+        # 2. De Wiskundige Handtekening
+        user_op_hash = get_user_op_hash(user_op, ENTRY_POINT_ADDRESS, 8453)
+        signed_message = architect_signer.sign_message(encode_defunct(primitive=user_op_hash))
+        user_op["signature"] = signed_message.signature.hex()
 
-        # 3. Verstuur de definitieve operatie
+        # 3. Verstuur de definitieve operatie naar Pimlico
         send_payload = {"jsonrpc": "2.0", "id": 1, "method": "eth_sendUserOperation", "params": [user_op, ENTRY_POINT_ADDRESS]}
         send_res = await client.post(BUNDLER_URL, json=send_payload)
         
@@ -136,11 +169,7 @@ async def execute_trade(token_to_buy, amount_eth):
     amount_wei = w3.to_wei(amount_eth, 'ether')
     
     logger.info("Verstuur Buy UserOperation...")
-    try:
-        return await send_user_operation(call_data, AERODROME_ROUTER, value=amount_wei)
-    except Exception as e:
-        logger.warning(f"Smart Vault trade gefaald ({e}).")
-        raise e
+    return await send_user_operation(call_data, AERODROME_ROUTER, value=amount_wei)
 
 async def execute_sell(token_addr):
     vault_addr = await get_smart_vault_address()
@@ -162,11 +191,7 @@ async def execute_sell(token_addr):
     ])
     
     logger.info("Verstuur Batched Sell UserOperation...")
-    try:
-        return await send_user_operation(batch_calldata, vault_addr, value=0, is_batch=True)
-    except Exception as e:
-        logger.error(f"Batched sell mislukt: {e}")
-        raise e
+    return await send_user_operation(batch_calldata, vault_addr, value=0, is_batch=True)
 
 async def get_current_value(token_addr):
     vault_addr = await get_smart_vault_address()
@@ -208,15 +233,12 @@ async def fetch_hunting_target():
     async with httpx.AsyncClient() as client:
         res = await client.get("https://api.dexscreener.com/latest/dex/search?q=WETH")
         if res.status_code != 200: return None
-        
         data = res.json()
         base_pairs = [p for p in data.get('pairs', []) if p.get('chainId') == 'base']
         valid_pairs = [p for p in base_pairs if p.get('liquidity', {}).get('usd', 0) > 10000]
         valid_pairs.sort(key=lambda x: x.get('volume', {}).get('h24', 0), reverse=True)
-        
         for pair in valid_pairs:
-            token_addr = pair['baseToken']['address']
-            if token_addr.lower() != WETH.lower():
+            if pair['baseToken']['address'].lower() != WETH.lower():
                 return pair
     return None
 
@@ -345,4 +367,4 @@ async def health():
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 10000))
     uvicorn.run(app, host="0.0.0.0", port=port)
-        
+    
