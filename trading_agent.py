@@ -1,76 +1,83 @@
+# --- 1. BOVENAAN: IMPORTS ---
 import logging
 import os
 import asyncio
+import threading
 from fastapi import FastAPI, Header, HTTPException
 from pydantic import BaseModel
 from web3 import Web3
 from eth_account import Account
 import uvicorn
+# Update: Nieuwe imports voor de commando's en versie 22.6
 from telegram import Update
 from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes
 
-# --- 1. CONFIGURATIE ---
+# --- CONFIGURATIE ---
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("Synthora")
 
 BASE_RPC_URL = "https://mainnet.base.org"
 w3 = Web3(Web3.HTTPProvider(BASE_RPC_URL))
 
-# Haal keys op uit Environment Variables (Render Dashboard)
+# Haal je keys op (zorg dat deze in Render Environment Variables staan)
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
-OWNER_ID = int(os.environ.get("OWNER_ID", 0)) 
-OWNER_SECRET = os.environ.get("OWNER_SECRET_KEY", "geheim")
+OWNER_ID = int(os.environ.get("OWNER_ID", 0))
 
-# --- 2. TELEGRAM COMMANDS ---
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Reageert op /start"""
+# --- 2. DE BOT COMMANDO'S ---
+async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Commando: /start"""
     if update.effective_user.id == OWNER_ID:
-        await update.message.reply_text("🏗️ **De Architect is online.**\nDe Skyline van Base is stabiel. Gebruik /status voor een rapport.")
+        await update.message.reply_text("🏗️ **De Architect is online.**\nDe Skyline van Base is stabiel. Ik sta klaar voor instructies.")
     else:
-        await update.message.reply_text("Toegang geweigerd. U bent niet geautoriseerd om Synthora aan te sturen.")
+        await update.message.reply_text("Toegang geweigerd. U bent niet geautoriseerd.")
 
-async def status(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Reageert op /status"""
+async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Commando: /status"""
     if update.effective_user.id == OWNER_ID:
         block = w3.eth.block_number
-        await update.message.reply_text(f"📊 **Synthora Status**\nNetwerk: Base Mainnet\nLaatste Block: {block}\nStatus: Operationeel")
+        await update.message.reply_text(f"📊 **Synthora Status Rapport**\n• Netwerk: Base Mainnet\n• Huidig Block: {block}\n• Status: Gekoppeld & Operationeel")
 
-# --- 3. DE BOT RUNNER ---
+# --- 3. HET MIDDEN: DE BOT FUNCTIE (GEFIXED VOOR v22.6) ---
 async def run_telegram_bot():
     if not TELEGRAM_TOKEN:
-        logger.error("Geen TELEGRAM_BOT_TOKEN gevonden!")
+        logger.error("[FOUT] Geen TELEGRAM_BOT_TOKEN gevonden!")
         return
-
-    # Bouw de applicatie (versie 22.6 compatibel)
+    
+    # Bouw de applicatie
     application = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
     
-    # Voeg de commando's toe
-    application.add_handler(CommandHandler("start", start))
-    application.add_handler(CommandHandler("status", status))
+    # Voeg de commando's toe zodat de bot reageert
+    application.add_handler(CommandHandler("start", start_command))
+    application.add_handler(CommandHandler("status", status_command))
     
+    # De specifieke opstartvolgorde om de 'AttributeError' te voorkomen:
     await application.initialize()
-    await application.start_polling()
-    logger.info("Telegram Bot is gestart met Polling.")
+    await application.start()
+    await application.updater.start_polling()
     
+    logger.info("[SYSTEM] Synthora Telegram Bot luistert nu op Telegram...")
+    
+    # Houd de achtergrondtaak levend
     while True:
         await asyncio.sleep(3600)
 
-# --- 4. FASTAPI (Voor Render Health Checks) ---
-app = FastAPI(title="Synthora Command Center")
+# --- 4. JE API ENDPOINTS (VOOR RENDER) ---
+app = FastAPI(title="De Architect - Chillzilla Command Center")
 
 @app.get("/")
 async def health_check():
-    return {"status": "online", "agent": "Synthora", "network": "Base"}
+    """Render gebruikt dit om te checken of de bot online is."""
+    return {"status": "online", "agent": "Synthora", "location": "Base Skyline"}
 
-# --- 5. DE OPSTART-MOTOR ---
+# --- 5. ONDERAAN: DE OPSTART-MOTOR ---
 @app.on_event("startup")
 async def startup_event():
-    # Start de bot in de achtergrond zonder de server te blokkeren
+    # Dit start de bot in de achtergrond zodra de server live gaat
     asyncio.create_task(run_telegram_bot())
 
 if __name__ == "__main__":
     # Render gebruikt poort 10000
     port = int(os.environ.get("PORT", 10000))
-    logger.info(f"Start server op poort {port}")
+    print(f"--- Start De Architect: API + Telegram op poort {port} ---")
     uvicorn.run(app, host="0.0.0.0", port=port)
     
