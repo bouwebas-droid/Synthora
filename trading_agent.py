@@ -21,13 +21,13 @@ w3 = Web3(Web3.HTTPProvider(BASE_RPC_URL))
 # Adressen voor Trading op Base
 AERODROME_ROUTER = "0xcF77a3Ba9A5CA399B7c97c74d54e5b1Beb874E43"
 WETH_ADDRESS = "0x4200000000000000000000000000000000000006"
-GAS_LIMIT_GWEI = 0.05  # De "Safe Guard" drempel
+GAS_LIMIT_GWEI = 0.05  # Jouw gevraagde Safe Guard
 
 OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY")
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
 OWNER_ID = int(os.environ.get("OWNER_ID", 0))
 
-# Architect Wallet laden
+# Jouw aparte Session Key laden
 private_key = os.environ.get("ARCHITECT_SESSION_KEY")
 architect_account = Account.from_key(private_key) if private_key else None
 llm = ChatOpenAI(model="gpt-4o", api_key=OPENAI_API_KEY)
@@ -50,12 +50,12 @@ async def execute_trade(token_to_buy, amount_eth):
     amount_wei = w3.to_wei(amount_eth, 'ether')
     router = w3.eth.contract(address=AERODROME_ROUTER, abi=ROUTER_ABI)
     
-    # Route instellen: ETH -> Target Token
+    # Route: ETH -> Target Token (Volatile Factory op Base)
     route = [{"from": WETH_ADDRESS, "to": w3.to_checksum_address(token_to_buy), "stable": False, "factory": "0x4200000000000000000000000000000000000001"}]
     
     nonce = w3.eth.get_transaction_count(architect_account.address)
     tx = router.functions.swapExactETHForTokens(
-        0, # amountOutMin (slippage controle kan later via AI)
+        0, # amountOutMin (voor nu 0, AI kan dit later berekenen)
         route,
         architect_account.address,
         int(time.time()) + 600
@@ -80,10 +80,14 @@ async def trade_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id != OWNER_ID: return
     
     try:
+        if not context.args or len(context.args) < 2:
+            await update.message.reply_text("Gebruik: `/trade [contract_adres] [hoeveelheid_eth]`")
+            return
+
         token_addr = context.args[0]
         amount = float(context.args[1])
         
-        await update.message.reply_text(f"🚀 **Executie gestart...**\n`{amount} ETH` naar `{token_addr[:8]}...`")
+        await update.message.reply_text(f"🚀 **Executie gestart...**\n`{amount} ETH` naar `{token_addr[:8]}...` aan het swappen.")
         
         tx_hash = await execute_trade(token_addr, amount)
         await update.message.reply_text(f"✅ **Trade verzonden naar Base!**\nHash: `{tx_hash}`\n[Basescan](https://basescan.org/tx/{tx_hash})", parse_mode='Markdown')
@@ -98,7 +102,7 @@ async def skyline_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     gas = w3.from_wei(w3.eth.gas_price, 'gwei')
     bal = w3.from_wei(w3.eth.get_balance(architect_account.address), 'ether') if architect_account else 0
     
-    prompt = f"Schrijf een vlijmscherpe update voor de Synthora Architect. Gas: {gas:.4f}, Balans: {bal:.4f} ETH. Wees kort en krachtig."
+    prompt = f"Schrijf een vlijmscherpe status-update voor de Synthora Architect. Gas: {gas:.4f} Gwei, Balans: {bal:.4f} ETH. Hou het professioneel maar gedurfd."
     res = llm.invoke(prompt)
     await update.message.reply_text(f"🏙️ **Skyline Status**\n\n{res.content}\n\n⛽ Gas: `{gas:.4f} Gwei` | 💳 Vault: `{bal:.4f} ETH`", parse_mode='Markdown')
 
@@ -112,15 +116,19 @@ async def run_bot():
     await app_bot.initialize()
     await app_bot.start()
     await app_bot.updater.start_polling()
-    while True: await asyncio.sleep(3600)
+    logger.info("Synthora Bot is polling...")
+    while True:
+        await asyncio.sleep(3600)
 
 app = FastAPI()
 @app.on_event("startup")
-async def startup(): asyncio.create_task(run_bot())
+async def startup():
+    asyncio.create_task(run_bot())
 
 @app.get("/")
-async def health(): return {"status": "active", "agent": "Synthora"}
+async def health():
+    return {"status": "active", "agent": "Synthora"}
 
 if __name__ == "__main__":
-    uvicorn.run(app, host="0.0.0.0", port=int(os.environ.get("PORT", 10000)))
-    
+    port = int(os.environ.get("PORT", 10000))
+    uvicorn.run(app, host="0.0.0.0", port=port)
