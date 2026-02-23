@@ -1,8 +1,9 @@
-python-telegram-bot
-coinbase-agentkit
-coinbase-agentkit-langchain
+fastapi
+uvicorn
+python-telegram-bot>=20.0
+coinbase-agentkit==0.7.4
+coinbase-agentkit-langchain==0.1.0
 langgraph
 langchain-openai
 langchain-core
-fastapi
-uvicorn
+pydantic-settings
