@@ -67,10 +67,12 @@ async def get_smart_vault_address():
         return None
 
 async def send_user_operation(call_data, to_address, value=0, is_batch=False):
+    """Bouwt, sponsort, ondertekent en verstuurt een UserOperation naar Pimlico."""
     vault_address = await get_smart_vault_address()
     if not vault_address: raise Exception("Smart Vault adres niet gevonden.")
 
     init_code = "0x"
+    # Als het contract nog niet bestaat, bereid de deployment voor in dezelfde actie
     if w3.eth.get_code(vault_address) == b'':
         factory_contract = w3.eth.contract(address=SIMPLE_ACCOUNT_FACTORY, abi=FACTORY_ABI)
         init_calldata = factory_contract.encode_abi("createAccount", args=[architect_signer.address, 0])
@@ -83,25 +85,39 @@ async def send_user_operation(call_data, to_address, value=0, is_batch=False):
     else:
         encoded_execute = account_contract.encode_abi("execute", args=[to_address, value, call_data])
 
+    # Gas data ophalen op Base
+    actuele_gas_prijs = w3.eth.gas_price
+    priority_fee = w3.to_wei(0.001, 'gwei')
+
     user_op = {
         "sender": vault_address,
         "nonce": hex(0), 
         "initCode": init_code,
         "callData": encoded_execute,
+        "callGasLimit": "0x1",          
+        "verificationGasLimit": "0x1",  
+        "preVerificationGas": "0x1",    
+        "maxFeePerGas": hex(actuele_gas_prijs),
+        "maxPriorityFeePerGas": hex(priority_fee),
+        "paymasterAndData": "0x",
         "signature": "0x" + "00" * 65 
     }
 
     async with httpx.AsyncClient() as client:
+        # 1. Vraag Paymaster om sponsoring (vult de gas parameters definitief in)
         sponsor_payload = {"jsonrpc": "2.0", "id": 1, "method": "pm_sponsorUserOperation", "params": [user_op, ENTRY_POINT_ADDRESS]}
         sponsor_res = await client.post(PAYMASTER_URL, json=sponsor_payload)
+        
         if sponsor_res.status_code != 200 or "error" in sponsor_res.json():
             logger.error(f"Pimlico sponsoring faalde: {sponsor_res.json()}")
-            raise Exception(sponsor_res.json())
+            raise Exception(f"Paymaster Fout: {sponsor_res.json().get('error', 'Onbekend')}")
             
         user_op.update(sponsor_res.json()["result"])
 
+        # 2. Dummy Signature voor deze bot structuur
         user_op["signature"] = architect_signer.sign_message(encode_defunct(text="DummyForNow")).signature.hex()
 
+        # 3. Verstuur de definitieve operatie
         send_payload = {"jsonrpc": "2.0", "id": 1, "method": "eth_sendUserOperation", "params": [user_op, ENTRY_POINT_ADDRESS]}
         send_res = await client.post(BUNDLER_URL, json=send_payload)
         
@@ -123,7 +139,7 @@ async def execute_trade(token_to_buy, amount_eth):
     try:
         return await send_user_operation(call_data, AERODROME_ROUTER, value=amount_wei)
     except Exception as e:
-        logger.warning(f"Smart Vault trade gefaald ({e}). Zorg dat Paymaster funded is.")
+        logger.warning(f"Smart Vault trade gefaald ({e}).")
         raise e
 
 async def execute_sell(token_addr):
