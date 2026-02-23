@@ -106,7 +106,47 @@ async def profit_guardian(update, token_addr, entry_eth, target_pct):
             logger.error(f"Guardian error: {e}")
             await asyncio.sleep(10)
 
-# --- 3. COMMAND CENTER ---
+# --- 3. COMMAND CENTER & SKYLINE RADAR ---
+
+async def radar_scanner(update, token_addr, eth_amt, target_pct):
+    await update.message.reply_text(f"📡 **Skyline Radar Geactiveerd.**\nToken `{token_addr[:8]}...` staat op de monitor voor Chillzilla. De AI zoekt de perfecte setup.")
+    
+    while True:
+        try:
+            gas = w3.from_wei(w3.eth.gas_price, 'gwei')
+            prompt = (
+                f"Je bent de meedogenloze trading-architect voor Chillzilla op Base. "
+                f"De gas prijs is {gas:.4f} Gwei. We scannen token {token_addr}. "
+                f"Is de markt gunstig voor een on-chain snipe? "
+                f"Antwoord UITSLUITEND met 'EXECUTE' of 'HOLD'."
+            )
+            
+            beslissing = llm.invoke(prompt).content.strip().upper()
+            
+            if "EXECUTE" in beslissing and gas <= GAS_LIMIT_GWEI:
+                await update.message.reply_text(f"⚡ **AI GEEFT GROEN LICHT!** Executie gestart voor `{token_addr[:8]}...`")
+                tx_hash = await execute_trade(token_addr, eth_amt)
+                await update.message.reply_text(f"✅ **Auto-Snipe Geslaagd.** Hash: `{tx_hash}`\nDe Profit Guardian neemt het over voor `{target_pct}%` winst.")
+                
+                asyncio.create_task(profit_guardian(update, token_addr, eth_amt, target_pct))
+                break 
+                
+            elif "EXECUTE" in beslissing and gas > GAS_LIMIT_GWEI:
+                logger.info(f"AI wilde snipen op {token_addr}, maar Gas ({gas:.2f}) was te hoog.")
+                
+            await asyncio.sleep(60) 
+            
+        except Exception as e:
+            logger.error(f"Radar error: {e}")
+            await asyncio.sleep(30)
+
+async def radar_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_user.id != OWNER_ID: return
+    try:
+        token, eth_amt, target = context.args[0], float(context.args[1]), float(context.args[2])
+        asyncio.create_task(radar_scanner(update, token, eth_amt, target))
+    except Exception as e:
+        await update.message.reply_text(f"❌ **Radar Setup Fout:** Gebruik `/radar [adres] [eth] [winst%]`")
 
 async def trade_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id != OWNER_ID: return
@@ -140,11 +180,12 @@ async def skyline_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except Exception as e:
         await update.message.reply_text(f"❌ Skyline sensor fout: {e}")
 
-# --- 4. FASTAPI & TELEGRAM RUNNER (HET ONTBREKENDE STUKJE) ---
+# --- 4. FASTAPI & TELEGRAM RUNNER ---
 
 async def run_bot():
     application = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
     application.add_handler(CommandHandler("trade", trade_command))
+    application.add_handler(CommandHandler("radar", radar_command))
     application.add_handler(CommandHandler("panic", panic_command))
     application.add_handler(CommandHandler("skyline", skyline_command))
     application.add_handler(CommandHandler("start", lambda u, c: u.message.reply_text("Architect Command Center Online.")))
