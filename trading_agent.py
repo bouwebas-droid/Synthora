@@ -31,104 +31,119 @@ private_key = os.environ.get("ARCHITECT_SESSION_KEY")
 architect_signer = Account.from_key(private_key) if private_key else None
 llm = ChatOpenAI(model="gpt-4o", api_key=os.environ.get("OPENAI_API_KEY"))
 
-# --- 2. ERC-4337 ENGINE ---
+# --- 2. CRYPTOGRAFIE ENGINE (PRECISIEWERK) ---
 
 def get_user_op_hash(op, entry_point, chain_id):
-    user_op_packed = encode(
+    """Berekent de UserOpHash conform de ERC-4337 standaard."""
+    # Hash de individuele velden die bytes vereisen
+    init_code_hash = w3.keccak(hexstr=op['initCode'])
+    call_data_hash = w3.keccak(hexstr=op['callData'])
+    paymaster_and_data_hash = w3.keccak(hexstr=op['paymasterAndData'])
+
+    # 1. Pack de UserOp
+    user_op_encoded = encode(
         ['address', 'uint256', 'bytes32', 'bytes32', 'uint256', 'uint256', 'uint256', 'uint256', 'uint256', 'bytes32'],
-        [w3.to_checksum_address(op['sender']), int(op['nonce'], 16), w3.keccak(hexstr=op['initCode']), 
-         w3.keccak(hexstr=op['callData']), int(op['callGasLimit'], 16), int(op['verificationGasLimit'], 16), 
-         int(op['preVerificationGas'], 16), int(op['maxFeePerGas'], 16), int(op['maxPriorityFeePerGas'], 16), 
-         w3.keccak(hexstr=op['paymasterAndData'])]
+        [
+            w3.to_checksum_address(op['sender']),
+            int(op['nonce'], 16),
+            init_code_hash,
+            call_data_hash,
+            int(op['callGasLimit'], 16),
+            int(op['verificationGasLimit'], 16),
+            int(op['preVerificationGas'], 16),
+            int(op['maxFeePerGas'], 16),
+            int(op['maxPriorityFeePerGas'], 16),
+            paymaster_and_data_hash
+        ]
     )
-    return w3.keccak(encode(['bytes32', 'address', 'uint256'], [w3.keccak(user_op_packed), w3.to_checksum_address(entry_point), chain_id]))
+    user_op_hash = w3.keccak(user_op_encoded)
+    
+    # 2. Combineer met EntryPoint en ChainId
+    final_encoded = encode(
+        ['bytes32', 'address', 'uint256'],
+        [user_op_hash, w3.to_checksum_address(entry_point), chain_id]
+    )
+    return w3.keccak(final_encoded)
 
 async def get_smart_vault_address():
-    factory = w3.eth.contract(address=SIMPLE_ACCOUNT_FACTORY, abi=[{"inputs":[{"name":"owner","type":"address"},{"name":"salt","type":"uint256"}],"name":"getAddress","outputs":[{"name":"","type":"address"}],"stateMutability":"view","type":"function"}])
+    factory_abi = [{"inputs":[{"name":"owner","type":"address"},{"name":"salt","type":"uint256"}],"name":"getAddress","outputs":[{"name":"","type":"address"}],"stateMutability":"view","type":"function"}]
+    factory = w3.eth.contract(address=SIMPLE_ACCOUNT_FACTORY, abi=factory_abi)
     return factory.functions.getAddress(architect_signer.address, 0).call()
 
 async def send_user_operation(call_data, to_address, value=0, is_batch=False):
     vault_address = await get_smart_vault_address()
+    
+    # InitCode bepalen
     init_code = "0x"
     if w3.eth.get_code(vault_address) == b'':
-        factory_abi = [{"inputs":[{"name":"owner","type":"address"},{"name":"salt","type":"uint256"}],"name":"createAccount","outputs":[{"name":"","type":"address"}],"stateMutability":"nonpayable","type":"function"}]
-        factory = w3.eth.contract(address=SIMPLE_ACCOUNT_FACTORY, abi=factory_abi)
-        init_code = SIMPLE_ACCOUNT_FACTORY + factory.encode_abi("createAccount", args=[architect_signer.address, 0])[2:]
+        factory_contract = w3.eth.contract(address=SIMPLE_ACCOUNT_FACTORY, abi=[{"inputs":[{"name":"owner","type":"address"},{"name":"salt","type":"uint256"}],"name":"createAccount","outputs":[{"name":"","type":"address"}],"stateMutability":"nonpayable","type":"function"}])
+        init_code = SIMPLE_ACCOUNT_FACTORY + factory_contract.encode_abi("createAccount", args=[architect_signer.address, 0])[2:]
 
+    # Nonce ophalen
     ep_abi = [{"inputs":[{"name":"sender","type":"address"},{"name":"key","type":"uint192"}],"name":"getNonce","outputs":[{"name":"nonce","type":"uint256"}],"stateMutability":"view","type":"function"}]
     ep_contract = w3.eth.contract(address=ENTRY_POINT_ADDRESS, abi=ep_abi)
     nonce = ep_contract.functions.getNonce(vault_address, 0).call()
 
-    account_abi = [{"inputs":[{"name":"dest","type":"address"},{"name":"value","type":"uint256"},{"name":"func","type":"bytes"}],"name":"execute","outputs":[],"stateMutability":"nonpayable","type":"function"},
-                   {"inputs":[{"name":"dest","type":"address[]"},{"name":"value","type":"uint256[]"},{"name":"func","type":"bytes[]"}],"name":"executeBatch","outputs":[],"stateMutability":"nonpayable","type":"function"}]
-    vault_contract = w3.eth.contract(address=vault_address, abi=account_abi)
-    
-    execute_data = call_data if is_batch else vault_contract.encode_abi("execute", args=[to_address, value, call_data])
+    # Execute Calldata
+    acc_abi = [{"inputs":[{"name":"dest","type":"address"},{"name":"value","type":"uint256"},{"name":"func","type":"bytes"}],"name":"execute","outputs":[],"stateMutability":"nonpayable","type":"function"}]
+    vault_contract = w3.eth.contract(address=vault_address, abi=acc_abi)
+    execute_data = vault_contract.encode_abi("execute", args=[to_address, value, call_data])
 
     user_op = {
-        "sender": vault_address, "nonce": hex(nonce), "initCode": init_code, "callData": execute_data,
-        "callGasLimit": hex(2000000), "verificationGasLimit": hex(2000000), "preVerificationGas": hex(2000000),
-        "maxFeePerGas": hex(w3.eth.gas_price), "maxPriorityFeePerGas": hex(w3.to_wei(0.001, 'gwei')),
-        "paymasterAndData": "0x", "signature": "0x" + "00" * 65
+        "sender": vault_address,
+        "nonce": hex(nonce),
+        "initCode": init_code,
+        "callData": execute_data,
+        "callGasLimit": hex(1500000),
+        "verificationGasLimit": hex(1500000),
+        "preVerificationGas": hex(1500000),
+        "maxFeePerGas": hex(w3.eth.gas_price),
+        "maxPriorityFeePerGas": hex(w3.to_wei(0.001, 'gwei')),
+        "paymasterAndData": "0x",
+        "signature": "0x" + "00" * 65 # Dummy voor sponsoring
     }
 
     async with httpx.AsyncClient() as client:
+        # 1. Sponsor via Pimlico
         res = await client.post(PAYMASTER_URL, json={"jsonrpc":"2.0","id":1,"method":"pm_sponsorUserOperation","params":[user_op, ENTRY_POINT_ADDRESS]})
-        if "error" in res.json(): raise Exception(f"Sponsor: {res.json()['error'].get('message', res.json()['error'])}")
+        if "error" in res.json(): 
+            raise Exception(f"Sponsor: {res.json()['error'].get('message', res.json()['error'])}")
+        
         user_op.update(res.json()["result"])
+
+        # 2. Cryptografisch Ondertekenen
         op_hash = get_user_op_hash(user_op, ENTRY_POINT_ADDRESS, 8453)
-        user_op["signature"] = architect_signer.signHash(op_hash).signature.hex()
+        # Gebruik sign_message met encode_defunct voor de standaard Ethereum prefix (SimpleAccount verwacht dit)
+        signature = architect_signer.sign_message(encode_defunct(primitive=op_hash))
+        user_op["signature"] = signature.signature.hex()
+
+        # 3. Verzenden naar Bundler
         sub = await client.post(BUNDLER_URL, json={"jsonrpc":"2.0","id":1,"method":"eth_sendUserOperation","params":[user_op, ENTRY_POINT_ADDRESS]})
-        if "error" in sub.json(): raise Exception(f"Bundler: {sub.json()['error'].get('message', sub.json()['error'])}")
+        if "error" in sub.json(): 
+            raise Exception(f"Bundler: {sub.json()['error'].get('message', sub.json()['error'])}")
+            
         return sub.json()["result"]
 
-# --- 3. TRADE LOGIC ---
-
-async def execute_trade(token_addr, eth_amt):
-    router_abi = [{"inputs":[{"name":"amountOutMin","type":"uint256"},{"name":"routes","type":"tuple[]","components":[{"name":"from","type":"address"},{"name":"to","type":"address"},{"name":"stable","type":"bool"},{"name":"factory","type":"address"}]},{"name":"to","type":"address"},{"name":"deadline","type":"uint256"}],"name":"swapExactETHForTokens","outputs":[{"name":"amounts","type":"uint256[]"}],"stateMutability":"payable","type":"function"}]
-    router = w3.eth.contract(address=AERODROME_ROUTER, abi=router_abi)
-    route = [{"from": WETH, "to": w3.to_checksum_address(token_addr), "stable": False, "factory": "0x4200000000000000000000000000000000000001"}]
-    call_data = router.encode_abi("swapExactETHForTokens", args=[0, route, await get_smart_vault_address(), int(time.time()) + 600])
-    return await send_user_operation(call_data, AERODROME_ROUTER, value=w3.to_wei(eth_amt, 'ether'))
-
-# --- 4. COMMAND CENTER ---
+# --- 3. COMMAND CENTER ---
 
 async def trade_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id != OWNER_ID: return
     if len(context.args) < 2:
-        await update.message.reply_text("❌ Gebruik: `/trade [adres] [eth]`")
+        await update.message.reply_text("❌ Gebruik: `/trade [token_adres] [eth_bedrag]`")
         return
     try:
         token, eth_amt = context.args[0], float(context.args[1])
-        await update.message.reply_text(f"🏗️ Architect verwerkt trade...")
-        op_hash = await execute_trade(token, eth_amt)
+        await update.message.reply_text(f"🏗️ Architect zet UserOp on-chain...")
+        
+        router_abi = [{"inputs":[{"name":"amountOutMin","type":"uint256"},{"name":"routes","type":"tuple[]","components":[{"name":"from","type":"address"},{"name":"to","type":"address"},{"name":"stable","type":"bool"},{"name":"factory","type":"address"}]},{"name":"to","type":"address"},{"name":"deadline","type":"uint256"}],"name":"swapExactETHForTokens","outputs":[{"name":"amounts","type":"uint256[]"}],"stateMutability":"payable","type":"function"}]
+        router = w3.eth.contract(address=AERODROME_ROUTER, abi=router_abi)
+        route = [{"from": WETH, "to": w3.to_checksum_address(token), "stable": False, "factory": "0x4200000000000000000000000000000000000001"}]
+        call_data = router.encode_abi("swapExactETHForTokens", args=[0, route, await get_smart_vault_address(), int(time.time()) + 600])
+        
+        op_hash = await send_user_operation(call_data, AERODROME_ROUTER, value=w3.to_wei(eth_amt, 'ether'))
         await update.message.reply_text(f"🚀 **Succes!** UserOp Hash: `{op_hash}`")
     except Exception as e:
-        await update.message.reply_text(f"❌ **Trade Fout:** {e}")
-
-async def hunt_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.effective_user.id != OWNER_ID: return
-    if not context.args:
-        await update.message.reply_text("❌ Gebruik: `/hunt [eth_bedrag]`")
-        return
-    try:
-        eth_amt = float(context.args[0])
-        await update.message.reply_text("🐺 **De Jacht is Geopend.** Scannen...")
-        async with httpx.AsyncClient() as client:
-            res = await client.get("https://api.dexscreener.com/latest/dex/search?q=WETH")
-            pairs = [p for p in res.json().get('pairs', []) if p.get('chainId') == 'base' and p.get('liquidity', {}).get('usd', 0) > 10000]
-            
-            if not pairs:
-                await update.message.reply_text("📉 Geen geschikte high-liquidity targets gevonden op Base.")
-                return
-                
-            target = pairs[0]
-            token_addr = target['baseToken']['address']
-            await update.message.reply_text(f"🎯 **Target:** `{target['baseToken']['name']}`. Executie...")
-            op_hash = await execute_trade(token_addr, eth_amt)
-            await update.message.reply_text(f"✅ **Hunt Geslaagd!** Hash: `{op_hash}`")
-    except Exception as e:
-        await update.message.reply_text(f"❌ **Hunt Fout:** {e}")
+        await update.message.reply_text(f"❌ **Fout melding:**\n`{str(e)}`")
 
 async def vault_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id != OWNER_ID: return
@@ -136,22 +151,13 @@ async def vault_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     b = w3.from_wei(w3.eth.get_balance(v), 'ether')
     await update.message.reply_text(f"🔐 **Vault:** `{v}`\n💰 **Balans:** `{b:.4f} ETH`")
 
-async def skyline_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.effective_user.id != OWNER_ID: return
-    gas = w3.from_wei(w3.eth.gas_price, 'gwei')
-    v = await get_smart_vault_address()
-    bal = w3.from_wei(w3.eth.get_balance(v), 'ether')
-    res = llm.invoke(f"Schrijf een vlijmscherp rapport. Gas: {gas:.4f} Gwei, Vault: {bal:.4f} ETH.")
-    await update.message.reply_text(f"🏙️ **Skyline Status**\n\n{res.content}")
-
-# --- 5. RUNNER ---
+# --- 4. RUNNER ---
 async def run_bot():
     app = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
     app.add_handler(CommandHandler("trade", trade_command))
-    app.add_handler(CommandHandler("hunt", hunt_command))
     app.add_handler(CommandHandler("vault", vault_command))
-    app.add_handler(CommandHandler("skyline", skyline_command))
     await app.initialize(); await app.start(); await app.updater.start_polling(drop_pending_updates=True)
+    logger.info("🚀 Architect Online.")
     while True: await asyncio.sleep(3600)
 
 app = FastAPI()
@@ -160,4 +166,4 @@ async def startup(): asyncio.create_task(run_bot())
 
 if __name__ == "__main__":
     uvicorn.run(app, host="0.0.0.0", port=int(os.environ.get("PORT", 10000)))
-  
+                        
