@@ -1,110 +1,95 @@
-# --- 1. BOVENAAN: INTELLIGENTE IMPORTS ---
+# --- 1. DE FUNDERING: IMPORTS ---
 import logging
 import os
 import asyncio
 from fastapi import FastAPI
 import uvicorn
-
-# Dynamische import-zoeker voor de Architect
-try:
-    from coinbase_agentkit.wallet_providers.cdp_wallet_provider import CdpWalletProvider, CdpWalletProviderConfig
-    import_status = "Pad A succesvol"
-except ImportError:
-    try:
-        from coinbase_agentkit.wallet_providers.cdp import CdpWalletProvider, CdpWalletProviderConfig
-        import_status = "Pad B succesvol"
-    except ImportError:
-        from coinbase_agentkit import CdpWalletProvider, CdpWalletProviderConfig
-        import_status = "Pad C succesvol"
-
-from coinbase_agentkit import AgentKit, AgentKitConfig
-from coinbase_agentkit_langchain import get_langchain_tools
-from langchain_openai import ChatOpenAI
+from web3 import Web3
+from eth_account import Account
 from telegram import Update
 from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes
+from langchain_openai import ChatOpenAI
 
-# --- CONFIGURATIE ---
+# --- CONFIGURATIE & BEVEILIGING ---
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("Synthora")
-logger.info(f"✅ Architect-module geladen via: {import_status}")
 
-# API Keys uit Render Environment
-CDP_API_KEY_NAME = os.environ.get("CDP_API_KEY_NAME")
-# De .replace zorgt dat de private key met \n goed gelezen wordt
-CDP_PRIVATE_KEY = os.environ.get("CDP_API_KEY_PRIVATE_KEY", "").replace('\\n', '\n')
+BASE_RPC_URL = "https://mainnet.base.org"
+w3 = Web3(Web3.HTTPProvider(BASE_RPC_URL))
+
 OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY")
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
 OWNER_ID = int(os.environ.get("OWNER_ID", 0))
 
-# --- 2. DE AGENT INITIALISEREN ---
-def setup_architect():
-    if not all([CDP_API_KEY_NAME, CDP_PRIVATE_KEY, OPENAI_API_KEY]):
-        logger.error("❌ Cruciale API keys missen!")
-        return None, None, None
+# Jouw apart beveiligde wallet laden
+private_key = os.environ.get("ARCHITECT_SESSION_KEY")
+if private_key:
+    architect_account = Account.from_key(private_key)
+    logger.info(f"🏗️ Architect geladen op adres: {architect_account.address}")
+else:
+    architect_account = None
+    logger.error("❌ GEEN ARCHITECT_SESSION_KEY GEVONDEN!")
 
-    wallet_provider = CdpWalletProvider(CdpWalletProviderConfig(
-        api_key_id=CDP_API_KEY_NAME,
-        api_key_secret=CDP_PRIVATE_KEY,
-        network_id="base-mainnet"
-    ))
+# AI Hersenen initialiseren
+llm = ChatOpenAI(model="gpt-4o", api_key=OPENAI_API_KEY)
+
+# --- 2. DE ARCHITECT LOGICA ---
+
+
+
+async def generate_skyline_report():
+    """Genereert een on-chain analyse van de Skyline."""
+    gas_price = w3.from_wei(w3.eth.gas_price, 'gwei')
+    block = w3.eth.block_number
+    balance = w3.from_wei(w3.eth.get_balance(architect_account.address), 'ether') if architect_account else 0
     
-    agent_kit = AgentKit(AgentKitConfig(wallet_provider=wallet_provider))
-    llm = ChatOpenAI(model="gpt-4o", api_key=OPENAI_API_KEY)
+    # AI-interpretatie van de status
+    prompt = f"Je bent de Synthora Architect. Status: Block {block}, Gas {gas_price:.2f} Gwei, Wallet {balance:.4f} ETH. Schrijf een kort, krachtig wekelijks rapport over de skyline van Base."
+    response = llm.invoke(prompt)
+    return response.content
+
+# --- 3. SECRET COMMANDS (OWNER ONLY) ---
+
+async def skyline_report_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Secret Command: /skyline_report"""
+    if update.effective_user.id != OWNER_ID: return
     
-    return wallet_provider, agent_kit, llm
+    await update.message.reply_text("📊 **Secret Command geactiveerd: Skyline Report genereren...**")
+    report = await generate_skyline_report()
+    await update.message.reply_text(f"📝 **WEKELIJKS SKYLINE RAPPORT**\n\n{report}", parse_mode='Markdown')
 
-wallet, agent, llm = setup_architect()
-
-# --- 3. COMMANDO'S ---
-
-async def skyline_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Toon on-chain balans via CDP."""
+async def vault_check_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Secret Command: /vault - Directe wallet inspectie"""
     if update.effective_user.id != OWNER_ID: return
-    await update.message.reply_chat_action("typing")
-    try:
-        balance = wallet.balance("eth")
-        addr = wallet.address
-        await update.message.reply_text(
-            f"🏙️ **Synthora Skyline Report**\n📍 Adres: `{addr}`\n💳 Balans: `{balance} ETH`", 
-            parse_mode='Markdown'
-        )
-    except Exception as e:
-        await update.message.reply_text(f"⚠️ Scan mislukt: {str(e)}")
-
-async def weekly_report_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Secret Command: AI Skyline Report."""
-    if update.effective_user.id != OWNER_ID: return
-    await update.message.reply_text("📊 **Genereren van Weekly Skyline Report...**")
-    await update.message.reply_chat_action("typing")
-    try:
-        prompt = f"Je bent de Synthora Architect op Base. Wallet: {wallet.address}. Schrijf een kort, technisch weekoverzicht voor de eigenaar."
-        response = llm.invoke(prompt)
-        await update.message.reply_text(f"📝 **OFFICIEEL RAPPORT**\n\n{response.content}", parse_mode='Markdown')
-    except Exception as e:
-        await update.message.reply_text("⚠️ AI-module offline.")
+    
+    bal = w3.from_wei(w3.eth.get_balance(architect_account.address), 'ether') if architect_account else 0
+    await update.message.reply_text(f"🔐 **Vault Status**\nAdres: `{architect_account.address}`\nBalans: `{bal:.5f} ETH`", parse_mode='Markdown')
 
 # --- 4. DE RUNNER ---
+
 async def run_telegram_bot():
     if not TELEGRAM_TOKEN: return
-    app_bot = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
+    application = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
     
-    app_bot.add_handler(CommandHandler("start", lambda u, c: u.message.reply_text("🏗️ Architect Online.")))
-    app_bot.add_handler(CommandHandler("skyline", skyline_command))
-    app_bot.add_handler(CommandHandler("weekly_report", weekly_report_command))
+    # Publieke commando's
+    application.add_handler(CommandHandler("start", lambda u, c: u.message.reply_text("Synthora Architect Online.")))
     
-    await app_bot.initialize()
-    await app_bot.start()
-    await app_bot.updater.start_polling()
-    logger.info("🚀 Synthora is actief op Telegram.")
+    # Secret Commands (Alleen zichtbaar/bruikbaar voor jou)
+    application.add_handler(CommandHandler("skyline_report", skyline_report_command))
+    application.add_handler(CommandHandler("vault", vault_check_command))
+    
+    await application.initialize()
+    await application.start()
+    await application.updater.start_polling()
+    logger.info("🚀 De Architect luistert...")
     while True: await asyncio.sleep(3600)
 
 app = FastAPI()
-
 @app.get("/")
-async def health(): return {"status": "online", "agent": "Synthora Architect"}
+async def health(): return {"status": "live", "agent": "Synthora"}
 
 @app.on_event("startup")
-async def startup_event():
+async def startup():
     asyncio.create_task(run_telegram_bot())
 
 if __name__ == "__main__":
