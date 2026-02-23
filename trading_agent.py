@@ -1,3 +1,6 @@
+import logging
+logging.basicConfig(level=logging.INFO)
+
 import os
 import time
 from fastapi import FastAPI, Header, HTTPException
