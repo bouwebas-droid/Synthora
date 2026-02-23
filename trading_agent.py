@@ -1,9 +1,7 @@
 # --- 1. IMPORTS & FUNDERING ---
-import logging, os, asyncio, time
-import httpx
+import logging, os, asyncio, time, httpx
 from web3 import Web3
 from eth_account import Account
-from eth_account.messages import encode_defunct
 from eth_abi import encode
 from telegram import Update
 from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes
@@ -29,7 +27,6 @@ SIMPLE_ACCOUNT_FACTORY = "0x9406Cc6185a346906296840746125a0E44976454"
 # Adressen Base
 AERODROME_ROUTER = "0xcF77a3Ba9A5CA399B7c97c74d54e5b1Beb874E43"
 WETH = "0x4200000000000000000000000000000000000006"
-GAS_LIMIT_GWEI = 0.05 
 
 OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY")
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
@@ -39,193 +36,121 @@ private_key = os.environ.get("ARCHITECT_SESSION_KEY")
 architect_signer = Account.from_key(private_key) if private_key else None
 llm = ChatOpenAI(model="gpt-4o", api_key=OPENAI_API_KEY)
 
-active_positions = {}
-
 # ABIs
-ROUTER_ABI = [
-    {"inputs":[{"name":"amountIn","type":"uint256"},{"name":"amountOutMin","type":"uint256"},{"name":"routes","type":"tuple[]","components":[{"name":"from","type":"address"},{"name":"to","type":"address"},{"name":"stable","type":"bool"},{"name":"factory","type":"address"}]},{"name":"to","type":"address"},{"name":"deadline","type":"uint256"}],"name":"swapExactTokensForETH","outputs":[{"name":"amounts","type":"uint256[]"}],"stateMutability":"nonpayable","type":"function"},
-    {"inputs":[{"name":"amountOutMin","type":"uint256"},{"name":"routes","type":"tuple[]","components":[{"name":"from","type":"address"},{"name":"to","type":"address"},{"name":"stable","type":"bool"},{"name":"factory","type":"address"}]},{"name":"to","type":"address"},{"name":"deadline","type":"uint256"}],"name":"swapExactETHForTokens","outputs":[{"name":"amounts","type":"uint256[]"}],"stateMutability":"payable","type":"function"},
-    {"inputs":[{"name":"amountIn","type":"uint256"},{"name":"routes","type":"tuple[]","components":[{"name":"from","type":"address"},{"name":"to","type":"address"},{"name":"stable","type":"bool"},{"name":"factory","type":"address"}]}], "name":"getAmountsOut", "outputs":[{"name":"amounts","type":"uint256[]"}], "stateMutability":"view", "type":"function"}
-]
-ERC20_ABI = [
-    {"inputs":[{"name":"spender","type":"address"},{"name":"amount","type":"uint256"}],"name":"approve","outputs":[{"name":"","type":"bool"}],"stateMutability":"nonpayable","type":"function"},
-    {"inputs":[{"name":"account","type":"address"}],"name":"balanceOf","outputs":[{"name":"","type":"uint256"}],"stateMutability":"view","type":"function"}
-]
-ACCOUNT_ABI = [{"inputs":[{"name":"dest","type":"address"},{"name":"value","type":"uint256"},{"name":"func","type":"bytes"}],"name":"execute","outputs":[],"stateMutability":"nonpayable","type":"function"},
-               {"inputs":[{"name":"dest","type":"address[]"},{"name":"value","type":"uint256[]"},{"name":"func","type":"bytes[]"}],"name":"executeBatch","outputs":[],"stateMutability":"nonpayable","type":"function"}]
-FACTORY_ABI = [{"inputs":[{"name":"owner","type":"address"},{"name":"salt","type":"uint256"}],"name":"getAddress","outputs":[{"name":"","type":"address"}],"stateMutability":"view","type":"function"},
-               {"inputs":[{"name":"owner","type":"address"},{"name":"salt","type":"uint256"}],"name":"createAccount","outputs":[{"name":"","type":"address"}],"stateMutability":"nonpayable","type":"function"}]
+ROUTER_ABI = [{"inputs":[{"name":"amountOutMin","type":"uint256"},{"name":"routes","type":"tuple[]","components":[{"name":"from","type":"address"},{"name":"to","type":"address"},{"name":"stable","type":"bool"},{"name":"factory","type":"address"}]},{"name":"to","type":"address"},{"name":"deadline","type":"uint256"}],"name":"swapExactETHForTokens","outputs":[{"name":"amounts","type":"uint256[]"}],"stateMutability":"payable","type":"function"}]
+ERC20_ABI = [{"inputs":[{"name":"spender","type":"address"},{"name":"amount","type":"uint256"}],"name":"approve","outputs":[{"name":"","type":"bool"}],"stateMutability":"nonpayable","type":"function"},{"inputs":[{"name":"account","type":"address"}],"name":"balanceOf","outputs":[{"name":"","type":"uint256"}],"stateMutability":"view","type":"function"}]
+ACCOUNT_ABI = [{"inputs":[{"name":"dest","type":"address"},{"name":"value","type":"uint256"},{"name":"func","type":"bytes"}],"name":"execute","outputs":[],"stateMutability":"nonpayable","type":"function"}]
+FACTORY_ABI = [{"inputs":[{"name":"owner","type":"address"},{"name":"salt","type":"uint256"}],"name":"getAddress","outputs":[{"name":"","type":"address"}],"stateMutability":"view","type":"function"},{"inputs":[{"name":"owner","type":"address"},{"name":"salt","type":"uint256"}],"name":"createAccount","outputs":[{"name":"","type":"address"}],"stateMutability":"nonpayable","type":"function"}]
 
-# --- 2. ERC-4337 SMART VAULT & CRYPTOGRAFIE ENGINE ---
+# --- 2. ERC-4337 CRYPTOGRAFIE ---
 
-def get_user_op_hash(op, entry_point, chain_id):
-    """Berekent de wiskundige hash van de UserOperation volgens ERC-4337 v0.6."""
-    hashed_init_code = w3.keccak(hexstr=op.get('initCode', '0x'))
-    hashed_call_data = w3.keccak(hexstr=op.get('callData', '0x'))
-    hashed_paymaster_and_data = w3.keccak(hexstr=op.get('paymasterAndData', '0x'))
-
-    user_op_encoded = encode(
+def pack_user_op(op):
+    """Pakt de UserOp in voor de hashing (volgens EntryPoint v0.6 specs)."""
+    return encode(
         ['address', 'uint256', 'bytes32', 'bytes32', 'uint256', 'uint256', 'uint256', 'uint256', 'uint256', 'bytes32'],
         [
             w3.to_checksum_address(op['sender']),
-            int(op.get('nonce', '0x0'), 16),
-            hashed_init_code,
-            hashed_call_data,
-            int(op.get('callGasLimit', '0x0'), 16),
-            int(op.get('verificationGasLimit', '0x0'), 16),
-            int(op.get('preVerificationGas', '0x0'), 16),
-            int(op.get('maxFeePerGas', '0x0'), 16),
-            int(op.get('maxPriorityFeePerGas', '0x0'), 16),
-            hashed_paymaster_and_data
+            int(op['nonce'], 16),
+            w3.keccak(hexstr=op['initCode']),
+            w3.keccak(hexstr=op['callData']),
+            int(op['callGasLimit'], 16),
+            int(op['verificationGasLimit'], 16),
+            int(op['preVerificationGas'], 16),
+            int(op['maxFeePerGas'], 16),
+            int(op['maxPriorityFeePerGas'], 16),
+            w3.keccak(hexstr=op['paymasterAndData'])
         ]
     )
-    user_op_hash = w3.keccak(user_op_encoded)
-    
-    enc = encode(
-        ['bytes32', 'address', 'uint256'],
-        [user_op_hash, w3.to_checksum_address(entry_point), chain_id]
-    )
-    return w3.keccak(enc)
 
-async def get_smart_vault_address():
-    if not architect_signer: return None
-    factory_contract = w3.eth.contract(address=SIMPLE_ACCOUNT_FACTORY, abi=FACTORY_ABI)
-    try:
-        return factory_contract.functions.getAddress(architect_signer.address, 0).call()
-    except Exception as e:
-        logger.error(f"Fout bij berekenen vault adres: {e}")
-        return None
-
-async def send_user_operation(call_data, to_address, value=0, is_batch=False):
-    """Bouwt, sponsort, ondertekent (cryptografisch) en verstuurt een UserOperation."""
+async def send_user_operation(call_data, to_address, value=0):
     vault_address = await get_smart_vault_address()
-    if not vault_address: raise Exception("Smart Vault adres niet gevonden.")
-
+    
     init_code = "0x"
     if w3.eth.get_code(vault_address) == b'':
-        factory_contract = w3.eth.contract(address=SIMPLE_ACCOUNT_FACTORY, abi=FACTORY_ABI)
-        init_calldata = factory_contract.encode_abi("createAccount", args=[architect_signer.address, 0])
-        init_code = SIMPLE_ACCOUNT_FACTORY + init_calldata[2:]
+        factory = w3.eth.contract(address=SIMPLE_ACCOUNT_FACTORY, abi=FACTORY_ABI)
+        init_code = SIMPLE_ACCOUNT_FACTORY + factory.encode_abi("createAccount", args=[architect_signer.address, 0])[2:]
+
+    # Haal de echte nonce op
+    ep_abi = [{"inputs":[{"name":"sender","type":"address"},{"name":"key","type":"uint192"}],"name":"getNonce","outputs":[{"name":"nonce","type":"uint256"}],"stateMutability":"view","type":"function"}]
+    ep_contract = w3.eth.contract(address=ENTRY_POINT_ADDRESS, abi=ep_abi)
+    nonce = ep_contract.functions.getNonce(vault_address, 0).call()
 
     account_contract = w3.eth.contract(address=vault_address, abi=ACCOUNT_ABI)
-    encoded_execute = call_data if is_batch else account_contract.encode_abi("execute", args=[to_address, value, call_data])
-
-    actuele_gas_prijs = w3.eth.gas_price
-    priority_fee = w3.to_wei(0.001, 'gwei')
-
-    # Haal de échte on-chain nonce op van het EntryPoint contract
-    ep_abi = [{"inputs":[{"name":"sender","type":"address"},{"name":"key","type":"uint192"}],"name":"getNonce","outputs":[{"name":"nonce","type":"uint256"}],"stateMutability":"view","type":"function"}]
-    entry_point_contract = w3.eth.contract(address=ENTRY_POINT_ADDRESS, abi=ep_abi)
-    try:
-        current_nonce = entry_point_contract.functions.getNonce(vault_address, 0).call()
-    except Exception:
-        current_nonce = 0
+    encoded_execute = account_contract.encode_abi("execute", args=[to_address, value, call_data])
 
     user_op = {
         "sender": vault_address,
-        "nonce": hex(current_nonce), 
+        "nonce": hex(nonce),
         "initCode": init_code,
         "callData": encoded_execute,
-        "callGasLimit": "0x1",          
-        "verificationGasLimit": "0x1",  
-        "preVerificationGas": "0x1",    
-        "maxFeePerGas": hex(actuele_gas_prijs),
-        "maxPriorityFeePerGas": hex(priority_fee),
+        "callGasLimit": hex(1000000), # Placeholder voor schatting
+        "verificationGasLimit": hex(1000000),
+        "preVerificationGas": hex(1000000),
+        "maxFeePerGas": hex(w3.eth.gas_price),
+        "maxPriorityFeePerGas": hex(w3.to_wei(0.001, 'gwei')),
         "paymasterAndData": "0x",
-        "signature": "0x" + "00" * 65 
+        "signature": "0x" + "00" * 65
     }
 
     async with httpx.AsyncClient() as client:
-        # 1. Sponsor via Paymaster
-        sponsor_payload = {"jsonrpc": "2.0", "id": 1, "method": "pm_sponsorUserOperation", "params": [user_op, ENTRY_POINT_ADDRESS]}
-        sponsor_res = await client.post(PAYMASTER_URL, json=sponsor_payload)
-        
-        if sponsor_res.status_code != 200 or "error" in sponsor_res.json():
-            raise Exception(f"Paymaster Fout: {sponsor_res.json()}")
-            
-        user_op.update(sponsor_res.json()["result"])
+        # 1. Sponsor
+        res = await client.post(PAYMASTER_URL, json={"jsonrpc":"2.0","id":1,"method":"pm_sponsorUserOperation","params":[user_op, ENTRY_POINT_ADDRESS]})
+        if "error" in res.json(): raise Exception(f"Sponsor Fout: {res.json()['error']}")
+        user_op.update(res.json()["result"])
 
-        # 2. De Wiskundige Handtekening
-        user_op_hash = get_user_op_hash(user_op, ENTRY_POINT_ADDRESS, 8453)
-        signed_message = architect_signer.sign_message(encode_defunct(primitive=user_op_hash))
-        user_op["signature"] = signed_message.signature.hex()
+        # 2. SignHash (Zonder prefix, pure ECDSA)
+        user_op_hash = w3.keccak(encode(['bytes32', 'address', 'uint256'], [w3.keccak(pack_user_op(user_op)), ENTRY_POINT_ADDRESS, 8453]))
+        signature = w3.eth.account.signHash(user_op_hash, private_key=private_key)
+        user_op["signature"] = signature.signature.hex()
 
-        # 3. Verstuur de definitieve operatie naar Pimlico
-        send_payload = {"jsonrpc": "2.0", "id": 1, "method": "eth_sendUserOperation", "params": [user_op, ENTRY_POINT_ADDRESS]}
-        send_res = await client.post(BUNDLER_URL, json=send_payload)
-        
-        if send_res.status_code != 200 or "error" in send_res.json():
-            raise Exception(f"Bundler afwijzing: {send_res.json()}")
-            
-        return send_res.json()["result"]
+        # 3. Submit
+        submit = await client.post(BUNDLER_URL, json={"jsonrpc":"2.0","id":1,"method":"eth_sendUserOperation","params":[user_op, ENTRY_POINT_ADDRESS]})
+        if "error" in submit.json(): raise Exception(f"Bundler Fout: {submit.json()['error']}")
+        return submit.json()["result"]
 
-# --- 3. DE TRADE & WINST ENGINE ---
+async def get_smart_vault_address():
+    factory = w3.eth.contract(address=SIMPLE_ACCOUNT_FACTORY, abi=FACTORY_ABI)
+    return factory.functions.getAddress(architect_signer.address, 0).call()
 
-async def execute_trade(token_to_buy, amount_eth):
-    router = w3.eth.contract(address=AERODROME_ROUTER, abi=ROUTER_ABI)
-    route = [{"from": WETH, "to": w3.to_checksum_address(token_to_buy), "stable": False, "factory": "0x4200000000000000000000000000000000000001"}]
-    
-    call_data = router.encode_abi("swapExactETHForTokens", args=[0, route, await get_smart_vault_address(), int(time.time()) + 600])
-    amount_wei = w3.to_wei(amount_eth, 'ether')
-    
-    logger.info("Verstuur Buy UserOperation...")
-    return await send_user_operation(call_data, AERODROME_ROUTER, value=amount_wei)
+# --- 3. COMMANDS ---
 
-async def execute_sell(token_addr):
-    vault_addr = await get_smart_vault_address()
-    token_contract = w3.eth.contract(address=w3.to_checksum_address(token_addr), abi=ERC20_ABI)
-    balance = token_contract.functions.balanceOf(vault_addr).call()
-    if balance == 0: return None
-    
-    approve_data = token_contract.encode_abi("approve", args=[AERODROME_ROUTER, balance])
-    
-    router = w3.eth.contract(address=AERODROME_ROUTER, abi=ROUTER_ABI)
-    route = [{"from": w3.to_checksum_address(token_addr), "to": WETH, "stable": False, "factory": "0x4200000000000000000000000000000000000001"}]
-    swap_data = router.encode_abi("swapExactTokensForETH", args=[balance, 0, route, vault_addr, int(time.time()) + 600])
-
-    account_contract = w3.eth.contract(address=vault_addr, abi=ACCOUNT_ABI)
-    batch_calldata = account_contract.encode_abi("executeBatch", args=[
-        [w3.to_checksum_address(token_addr), AERODROME_ROUTER],
-        [0, 0],
-        [approve_data, swap_data]
-    ])
-    
-    logger.info("Verstuur Batched Sell UserOperation...")
-    return await send_user_operation(batch_calldata, vault_addr, value=0, is_batch=True)
-
-async def get_current_value(token_addr):
-    vault_addr = await get_smart_vault_address()
-    token_contract = w3.eth.contract(address=w3.to_checksum_address(token_addr), abi=ERC20_ABI)
-    bal = token_contract.functions.balanceOf(vault_addr).call()
-    if bal == 0: return 0
-    router = w3.eth.contract(address=AERODROME_ROUTER, abi=ROUTER_ABI)
-    route = [{"from": w3.to_checksum_address(token_addr), "to": WETH, "stable": False, "factory": "0x4200000000000000000000000000000000000001"}]
+async def trade_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_user.id != OWNER_ID: return
     try:
-        amounts = router.functions.getAmountsOut(bal, route).call()
-        return w3.from_wei(amounts[-1], 'ether')
-    except:
-        return 0
+        token, eth_amt = context.args[0], float(context.args[1])
+        router = w3.eth.contract(address=AERODROME_ROUTER, abi=ROUTER_ABI)
+        route = [{"from": WETH, "to": w3.to_checksum_address(token), "stable": False, "factory": "0x4200000000000000000000000000000000000001"}]
+        call_data = router.encode_abi("swapExactETHForTokens", args=[0, route, await get_smart_vault_address(), int(time.time()) + 600])
+        
+        op_hash = await send_user_operation(call_data, AERODROME_ROUTER, value=w3.to_wei(eth_amt, 'ether'))
+        await update.message.reply_text(f"🚀 **UserOp Verzonden!**\nHash: `{op_hash}`")
+    except Exception as e:
+        await update.message.reply_text(f"❌ **Fout:** {e}")
 
-async def profit_guardian(update, token_addr, entry_eth, target_pct):
-    token_addr = w3.to_checksum_address(token_addr)
-    active_positions[token_addr] = {"entry": entry_eth, "target": target_pct}
-    
-    while token_addr in active_positions:
-        try:
-            current_val = await get_current_value(token_addr)
-            if current_val == 0: break 
-            
-            profit_pct = ((float(current_val) - float(entry_eth)) / float(entry_eth)) * 100
-            
-            if profit_pct >= target_pct and current_val > entry_eth:
-                await update.message.reply_text(f"🎯 **Target Bereikt!** Winst: `{profit_pct:.2f}%`.\nBatched executie verkoop...")
-                tx_hash = await execute_sell(token_addr)
-                await update.message.reply_text(f"💰 **Pure Winst Verzilverd! (Gasless)**\nUserOp Hash: `{tx_hash}`", parse_mode='Markdown')
-                del active_positions[token_addr]
-                break
-            await asyncio.sleep(30)
-        except Exception as e:
-            await asyncio.sleep(10)
+async def vault_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_user.id != OWNER_ID: return
+    v = await get_smart_vault_address()
+    b = w3.from_wei(w3.eth.get_balance(v), 'ether')
+    await update.message.reply_text(f"🔐 **Vault:** `{v}`\n💰 **Balans:** `{b:.4f} ETH`")
+
+# --- 4. RUNNER ---
+
+async def run_bot():
+    app = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
+    app.add_handler(CommandHandler("trade", trade_command))
+    app.add_handler(CommandHandler("vault", vault_command))
+    await app.initialize()
+    await app.start()
+    await app.updater.start_polling()
+    while True: await asyncio.sleep(3600)
+
+app = FastAPI()
+@app.on_event("startup")
+async def startup(): asyncio.create_task(run_bot())
+
+if __name__ == "__main__":
+    uvicorn.run(app, host="0.0.0.0", port=int(os.environ.get("PORT", 10000)))
+        
 
 # --- 4. AUTONOME JACHT (RADAR & HUNT) ---
 
