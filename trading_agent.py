@@ -1,5 +1,6 @@
 # --- 1. IMPORTS & FUNDERING ---
 import logging, os, asyncio, time
+import httpx
 from web3 import Web3
 from eth_account import Account
 from telegram import Update
@@ -15,6 +16,14 @@ logger = logging.getLogger("Synthora")
 BASE_RPC_URL = "https://mainnet.base.org"
 w3 = Web3(Web3.HTTPProvider(BASE_RPC_URL))
 
+# Pimlico & ERC-4337 Adressen
+PIMLICO_API_KEY = os.environ.get("PIMLICO_API_KEY", "")
+BUNDLER_URL = f"https://api.pimlico.io/v2/8453/rpc?apikey={PIMLICO_API_KEY}"
+PAYMASTER_URL = BUNDLER_URL
+
+ENTRY_POINT_ADDRESS = "0x5FF137D4b0FDCD49DcA30c7CF57E578a026d2789"
+SIMPLE_ACCOUNT_FACTORY = "0x9406Cc6185a346906296840746125a0E44976454"
+
 # Adressen Base
 AERODROME_ROUTER = "0xcF77a3Ba9A5CA399B7c97c74d54e5b1Beb874E43"
 WETH = "0x4200000000000000000000000000000000000006"
@@ -26,6 +35,9 @@ OWNER_ID = int(os.environ.get("OWNER_ID", 0))
 
 private_key = os.environ.get("ARCHITECT_SESSION_KEY")
 architect_account = Account.from_key(private_key) if private_key else None
+# Voor de duidelijkheid in de Smart Account logica hernoemen we hem ook even:
+architect_signer = architect_account 
+
 llm = ChatOpenAI(model="gpt-4o", api_key=OPENAI_API_KEY)
 
 active_positions = {}
@@ -180,7 +192,44 @@ async def skyline_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except Exception as e:
         await update.message.reply_text(f"❌ Skyline sensor fout: {e}")
 
-# --- 4. FASTAPI & TELEGRAM RUNNER ---
+# --- 4. SMART VAULT LOGICA (ERC-4337) ---
+
+async def get_smart_vault_address():
+    if not architect_signer: return "Geen Signer Key gevonden."
+    factory_abi = [{"inputs":[{"name":"owner","type":"address"},{"name":"salt","type":"uint256"}],"name":"getAddress","outputs":[{"name":"","type":"address"}],"stateMutability":"view","type":"function"}]
+    factory_contract = w3.eth.contract(address=SIMPLE_ACCOUNT_FACTORY, abi=factory_abi)
+    try:
+        vault_address = factory_contract.functions.getAddress(architect_signer.address, 0).call()
+        return vault_address
+    except Exception as e:
+        logger.error(f"Fout bij berekenen vault adres: {e}")
+        return "Berekening mislukt"
+
+async def vault_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_user.id != OWNER_ID: return
+    await update.message.reply_chat_action("typing")
+    
+    vault_addr = await get_smart_vault_address()
+    signer_bal = w3.from_wei(w3.eth.get_balance(architect_signer.address), 'ether') if architect_signer else 0
+    vault_bal = w3.from_wei(w3.eth.get_balance(vault_addr), 'ether') if vault_addr.startswith("0x") else 0
+    
+    code = w3.eth.get_code(vault_addr) if vault_addr.startswith("0x") else b''
+    status = "🟢 Gedeployed (Actief)" if code != b'' else "🟡 Wacht op deployment (Counterfactual)"
+    
+    bericht = (
+        f"🔐 **Chillzilla Smart Vault Status**\n\n"
+        f"**Signer (Sleutelmeester):**\n"
+        f"Adres: `{architect_signer.address if architect_signer else 'Ontbreekt'}`\n"
+        f"Balans: `{signer_bal:.4f} ETH`\n\n"
+        f"**Smart Vault (De Kluis):**\n"
+        f"Adres: `{vault_addr}`\n"
+        f"Status: {status}\n"
+        f"Balans: `{vault_bal:.4f} ETH`\n\n"
+        f"*(De Vault wordt on-chain gezet bij de eerste gasless trade via Pimlico.)*"
+    )
+    await update.message.reply_text(bericht, parse_mode='Markdown')
+
+# --- 5. FASTAPI & TELEGRAM RUNNER ---
 
 async def run_bot():
     application = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
@@ -188,6 +237,7 @@ async def run_bot():
     application.add_handler(CommandHandler("radar", radar_command))
     application.add_handler(CommandHandler("panic", panic_command))
     application.add_handler(CommandHandler("skyline", skyline_command))
+    application.add_handler(CommandHandler("vault", vault_command)) # Nieuw commando geregistreerd
     application.add_handler(CommandHandler("start", lambda u, c: u.message.reply_text("Architect Command Center Online.")))
     
     await application.initialize()
@@ -209,4 +259,4 @@ async def health():
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 10000))
     uvicorn.run(app, host="0.0.0.0", port=port)
-    
+                
