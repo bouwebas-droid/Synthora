@@ -1,13 +1,12 @@
-# --- 1. BOVENAAN: GEFIXTE IMPORTS ---
 import logging
 import os
 import asyncio
 from fastapi import FastAPI
 import uvicorn
 
-# De nieuwe modulaire paden voor de Coinbase AgentKit
+# Gecorrigeerde imports voor versie 0.7.4
 from coinbase_agentkit import AgentKit, AgentKitConfig
-from coinbase_agentkit.wallet_providers import CdpWalletProvider, CdpWalletProviderConfig
+from coinbase_agentkit.wallet_providers.cdp_wallet_provider import CdpWalletProvider, CdpWalletProviderConfig
 from coinbase_agentkit_langchain import get_langchain_tools
 
 from langchain_openai import ChatOpenAI
@@ -19,19 +18,18 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("Synthora")
 
 CDP_API_KEY_NAME = os.environ.get("CDP_API_KEY_NAME")
+# De .replace zorgt dat de private key altijd goed gelezen wordt door Python op Render
 CDP_PRIVATE_KEY = os.environ.get("CDP_API_KEY_PRIVATE_KEY", "").replace('\\n', '\n')
 OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY")
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
 OWNER_ID = int(os.environ.get("OWNER_ID", 0))
 
-# --- 2. DE AGENT INITIALISEREN ---
+# --- 2. AGENT INITIALISATIE ---
 def setup_architect():
-    """Initialiseert de CDP Wallet met de juiste modulaire imports."""
     if not all([CDP_API_KEY_NAME, CDP_PRIVATE_KEY, OPENAI_API_KEY]):
-        logger.warning("⚠️ Let op: Sleutels incompleet.")
+        logger.warning("⚠️ Sleutels missen in Environment Variables!")
         return None, None, None
 
-    # Wallet Provider (Nu via de sub-module geïmporteerd)
     wallet_provider = CdpWalletProvider(CdpWalletProviderConfig(
         api_key_id=CDP_API_KEY_NAME,
         api_key_secret=CDP_PRIVATE_KEY,
@@ -53,13 +51,13 @@ async def skyline_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         balance = wallet.balance("eth") if wallet else "N/A"
         addr = wallet.address if wallet else "N/A"
         await update.message.reply_text(
-            f"🏙️ **Skyline Scan**\n📍 Adres: `{addr}`\n💳 Balans: `{balance} ETH`", 
+            f"🏙️ **Synthora Skyline Report**\n📍 Adres: `{addr}`\n💳 Balans: `{balance} ETH`", 
             parse_mode='Markdown'
         )
     except Exception as e:
-        await update.message.reply_text(f"⚠️ Fout: {str(e)}")
+        await update.message.reply_text(f"⚠️ Fout bij on-chain scan: {str(e)}")
 
-# --- 4. DE RUNNER ---
+# --- 4. RUNNER ---
 async def run_telegram_bot():
     if not TELEGRAM_TOKEN: return
     app_bot = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
@@ -69,6 +67,8 @@ async def run_telegram_bot():
     await app_bot.initialize()
     await app_bot.start()
     await app_bot.updater.start_polling()
+    
+    logger.info("[SYSTEM] Synthora Bot is actief op Telegram.")
     while True: await asyncio.sleep(3600)
 
 app = FastAPI()
@@ -83,4 +83,4 @@ async def startup_event():
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 10000))
     uvicorn.run(app, host="0.0.0.0", port=port)
-        
+    
