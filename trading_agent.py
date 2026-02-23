@@ -1,4 +1,4 @@
-# --- 1. BOVENAAN: EXTRA IMPORTS ---
+# --- 1. IMPORTS & FUNDERING ---
 import logging, os, asyncio, time
 from web3 import Web3
 from eth_account import Account
@@ -8,58 +8,100 @@ from langchain_openai import ChatOpenAI
 from fastapi import FastAPI
 import uvicorn
 
-# --- CONFIG & GLOBALS ---
+# --- CONFIGURATIE ---
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("Synthora")
-w3 = Web3(Web3.HTTPProvider("https://mainnet.base.org"))
 
+BASE_RPC_URL = "https://mainnet.base.org"
+w3 = Web3(Web3.HTTPProvider(BASE_RPC_URL))
+
+# Adressen Base
 AERODROME_ROUTER = "0xcF77a3Ba9A5CA399B7c97c74d54e5b1Beb874E43"
 WETH = "0x4200000000000000000000000000000000000006"
-GAS_LIMIT = 0.05 
+GAS_LIMIT_GWEI = 0.05 
 
+OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY")
+TELEGRAM_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
 OWNER_ID = int(os.environ.get("OWNER_ID", 0))
+
 private_key = os.environ.get("ARCHITECT_SESSION_KEY")
 architect_account = Account.from_key(private_key) if private_key else None
-llm = ChatOpenAI(model="gpt-4o", api_key=os.environ.get("OPENAI_API_KEY"))
+llm = ChatOpenAI(model="gpt-4o", api_key=OPENAI_API_KEY)
 
-# Dit houdt je actieve posities bij in het geheugen van de bot
-active_positions = {} 
+active_positions = {}
 
-# --- 2. DE "PURE PROFIT" ENGINE ---
+# ABIs
+ROUTER_ABI = [
+    {"inputs":[{"name":"amountIn","type":"uint256"},{"name":"amountOutMin","type":"uint256"},{"name":"routes","type":"tuple[]","components":[{"name":"from","type":"address"},{"name":"to","type":"address"},{"name":"stable","type":"bool"},{"name":"factory","type":"address"}]},{"name":"to","type":"address"},{"name":"deadline","type":"uint256"}],"name":"swapExactTokensForETH","outputs":[{"name":"amounts","type":"uint256[]"}],"stateMutability":"nonpayable","type":"function"},
+    {"inputs":[{"name":"amountOutMin","type":"uint256"},{"name":"routes","type":"tuple[]","components":[{"name":"from","type":"address"},{"name":"to","type":"address"},{"name":"stable","type":"bool"},{"name":"factory","type":"address"}]},{"name":"to","type":"address"},{"name":"deadline","type":"uint256"}],"name":"swapExactETHForTokens","outputs":[{"name":"amounts","type":"uint256[]"}],"stateMutability":"payable","type":"function"},
+    {"inputs":[{"name":"amountIn","type":"uint256"},{"name":"routes","type":"tuple[]","components":[{"name":"from","type":"address"},{"name":"to","type":"address"},{"name":"stable","type":"bool"},{"name":"factory","type":"address"}]}], "name":"getAmountsOut", "outputs":[{"name":"amounts","type":"uint256[]"}], "stateMutability":"view", "type":"function"}
+]
+ERC20_ABI = [
+    {"inputs":[{"name":"spender","type":"address"},{"name":"amount","type":"uint256"}],"name":"approve","outputs":[{"name":"","type":"bool"}],"stateMutability":"nonpayable","type":"function"},
+    {"inputs":[{"name":"account","type":"address"}],"name":"balanceOf","outputs":[{"name":"","type":"uint256"}],"stateMutability":"view","type":"function"}
+]
+
+# --- 2. DE TRADE & WINST ENGINE ---
+
+async def execute_trade(token_to_buy, amount_eth):
+    current_gas = w3.from_wei(w3.eth.gas_price, 'gwei')
+    if current_gas > GAS_LIMIT_GWEI:
+        raise Exception(f"Gas te hoog: {current_gas:.4f} Gwei (Limiet: {GAS_LIMIT_GWEI})")
+
+    amount_wei = w3.to_wei(amount_eth, 'ether')
+    router = w3.eth.contract(address=AERODROME_ROUTER, abi=ROUTER_ABI)
+    route = [{"from": WETH, "to": w3.to_checksum_address(token_to_buy), "stable": False, "factory": "0x4200000000000000000000000000000000000001"}]
+    
+    nonce = w3.eth.get_transaction_count(architect_account.address)
+    tx = router.functions.swapExactETHForTokens(0, route, architect_account.address, int(time.time()) + 600).build_transaction({
+        'from': architect_account.address, 'value': amount_wei, 'gas': 250000, 'gasPrice': w3.eth.gas_price, 'nonce': nonce, 'chainId': 8453
+    })
+    signed_tx = w3.eth.account.sign_transaction(tx, private_key)
+    tx_hash = w3.eth.send_raw_transaction(signed_tx.rawTransaction)
+    return w3.to_hex(tx_hash)
+
+async def execute_sell(token_addr):
+    token_contract = w3.eth.contract(address=w3.to_checksum_address(token_addr), abi=ERC20_ABI)
+    balance = token_contract.functions.balanceOf(architect_account.address).call()
+    if balance == 0: return None
+    
+    token_contract.functions.approve(AERODROME_ROUTER, balance).transact({'from': architect_account.address})
+    router = w3.eth.contract(address=AERODROME_ROUTER, abi=ROUTER_ABI)
+    route = [{"from": w3.to_checksum_address(token_addr), "to": WETH, "stable": False, "factory": "0x4200000000000000000000000000000000000001"}]
+    
+    tx = router.functions.swapExactTokensForETH(balance, 0, route, architect_account.address, int(time.time()) + 600).build_transaction({
+        'from': architect_account.address, 'nonce': w3.eth.get_transaction_count(architect_account.address), 'gas': 300000, 'gasPrice': w3.eth.gas_price, 'chainId': 8453
+    })
+    signed = w3.eth.account.sign_transaction(tx, private_key)
+    return w3.to_hex(w3.eth.send_raw_transaction(signed.rawTransaction))
 
 async def get_current_value(token_addr):
-    """Berekent de huidige waarde van je tokens in ETH."""
     token_contract = w3.eth.contract(address=w3.to_checksum_address(token_addr), abi=ERC20_ABI)
     bal = token_contract.functions.balanceOf(architect_account.address).call()
     if bal == 0: return 0
-    
     router = w3.eth.contract(address=AERODROME_ROUTER, abi=ROUTER_ABI)
     route = [{"from": w3.to_checksum_address(token_addr), "to": WETH, "stable": False, "factory": "0x4200000000000000000000000000000000000001"}]
     amounts = router.functions.getAmountsOut(bal, route).call()
     return w3.from_wei(amounts[-1], 'ether')
 
 async def profit_guardian(update, token_addr, entry_eth, target_pct):
-    """De bewaker die alleen bij winst verkoopt."""
     token_addr = w3.to_checksum_address(token_addr)
-    # De bot onthoudt dat we deze token hebben
     active_positions[token_addr] = {"entry": entry_eth, "target": target_pct}
     
     while token_addr in active_positions:
         try:
             current_val = await get_current_value(token_addr)
-            if current_val == 0: break # Positie is blijkbaar al weg
+            if current_val == 0: break 
             
-            profit_pct = ((current_val - entry_eth) / entry_eth) * 100
+            profit_pct = ((float(current_val) - float(entry_eth)) / float(entry_eth)) * 100
             
-            # Alleen verkopen als target is bereikt EN we boven entry zitten
             if profit_pct >= target_pct and current_val > entry_eth:
                 await update.message.reply_text(f"🎯 **Target Bereikt!** Winst: `{profit_pct:.2f}%`.\nExecutie verkoop...")
                 tx = await execute_sell(token_addr)
                 await update.message.reply_text(f"💰 **Pure Winst Verzilverd!**\nHash: [Basescan](https://basescan.org/tx/{tx})", parse_mode='Markdown')
                 del active_positions[token_addr]
                 break
-                
-            await asyncio.sleep(30) # Check elke 30 seconden voor snelle Skyline actie
+            await asyncio.sleep(30)
         except Exception as e:
             logger.error(f"Guardian error: {e}")
             await asyncio.sleep(10)
@@ -67,26 +109,63 @@ async def profit_guardian(update, token_addr, entry_eth, target_pct):
 # --- 3. COMMAND CENTER ---
 
 async def trade_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Gebruik: /trade [token] [eth] [winst%]"""
     if update.effective_user.id != OWNER_ID: return
     try:
         token, eth_amt, target = context.args[0], float(context.args[1]), float(context.args[2])
-        
-        # 1. De Koop
         tx_hash = await execute_trade(token, eth_amt)
-        await update.message.reply_text(f"🚀 **Gekocht!** De Architect schaduwt nu de koers voor `{target}%` winst.")
-        
-        # 2. Start de Guardian
+        await update.message.reply_text(f"🚀 **Gekocht!** Hash: `{tx_hash}`\nDe Architect schaduwt nu de koers voor `{target}%` winst.", parse_mode='Markdown')
         asyncio.create_task(profit_guardian(update, token, eth_amt, target))
     except Exception as e:
         await update.message.reply_text(f"❌ **Trade Fout:** {e}")
 
 async def panic_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """De nooduitgang: /panic [token] - Verkoopt ALLES direct."""
     if update.effective_user.id != OWNER_ID: return
-    token = context.args[0]
-    await update.message.reply_text(f"⚠️ **PANIC MODE!** De Architect dumpt alles voor `{token[:10]}...`")
-    tx = await execute_sell(token)
-    if token in active_positions: del active_positions[token]
-    await update.message.reply_text(f"🏁 **Nooduitgang voltooid.** Hash: `{tx}`")
+    try:
+        token = context.args[0]
+        await update.message.reply_text(f"⚠️ **PANIC MODE!** Alles liquideren...")
+        tx = await execute_sell(token)
+        if token in active_positions: del active_positions[token]
+        await update.message.reply_text(f"🏁 **Nooduitgang voltooid.** Hash: `{tx}`", parse_mode='Markdown')
+    except Exception as e:
+        await update.message.reply_text(f"❌ **Panic Fout:** {e}")
+
+async def skyline_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_user.id != OWNER_ID: return
+    await update.message.reply_chat_action("typing")
+    try:
+        gas = w3.from_wei(w3.eth.gas_price, 'gwei')
+        bal = w3.from_wei(w3.eth.get_balance(architect_account.address), 'ether')
+        res = llm.invoke(f"Schrijf een vlijmscherp on-chain rapport. Gas: {gas:.4f} Gwei, Balans: {bal:.4f} ETH.")
+        await update.message.reply_text(f"🏙️ **Skyline Status**\n\n{res.content}\n\n⛽ Gas: `{gas:.4f}` | 💳 Vault: `{bal:.4f} ETH`", parse_mode='Markdown')
+    except Exception as e:
+        await update.message.reply_text(f"❌ Skyline sensor fout: {e}")
+
+# --- 4. FASTAPI & TELEGRAM RUNNER (HET ONTBREKENDE STUKJE) ---
+
+async def run_bot():
+    application = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
+    application.add_handler(CommandHandler("trade", trade_command))
+    application.add_handler(CommandHandler("panic", panic_command))
+    application.add_handler(CommandHandler("skyline", skyline_command))
+    application.add_handler(CommandHandler("start", lambda u, c: u.message.reply_text("Architect Command Center Online.")))
+    
+    await application.initialize()
+    await application.start()
+    await application.updater.start_polling(drop_pending_updates=True)
+    logger.info("🚀 Architect Telegram Bot is live!")
+    while True: await asyncio.sleep(3600)
+
+app = FastAPI()
+
+@app.on_event("startup")
+async def startup():
+    asyncio.create_task(run_bot())
+
+@app.get("/")
+async def health():
+    return {"status": "active", "agent": "Synthora Architect"}
+
+if __name__ == "__main__":
+    port = int(os.environ.get("PORT", 10000))
+    uvicorn.run(app, host="0.0.0.0", port=port)
     
