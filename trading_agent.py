@@ -55,7 +55,6 @@ ACCOUNT_ABI = [{"inputs":[{"name":"dest","type":"address"},{"name":"value","type
 FACTORY_ABI = [{"inputs":[{"name":"owner","type":"address"},{"name":"salt","type":"uint256"}],"name":"getAddress","outputs":[{"name":"","type":"address"}],"stateMutability":"view","type":"function"},
                {"inputs":[{"name":"owner","type":"address"},{"name":"salt","type":"uint256"}],"name":"createAccount","outputs":[{"name":"","type":"address"}],"stateMutability":"nonpayable","type":"function"}]
 
-
 # --- 2. ERC-4337 SMART VAULT & PIMLICO ENGINE ---
 
 async def get_smart_vault_address():
@@ -68,48 +67,41 @@ async def get_smart_vault_address():
         return None
 
 async def send_user_operation(call_data, to_address, value=0, is_batch=False):
-    """Bouwt, sponsort, ondertekent en verstuurt een UserOperation."""
     vault_address = await get_smart_vault_address()
     if not vault_address: raise Exception("Smart Vault adres niet gevonden.")
 
     init_code = "0x"
     if w3.eth.get_code(vault_address) == b'':
         factory_contract = w3.eth.contract(address=SIMPLE_ACCOUNT_FACTORY, abi=FACTORY_ABI)
-        init_calldata = factory_contract.encodeABI(fn_name="createAccount", args=[architect_signer.address, 0])
+        init_calldata = factory_contract.encode_abi("createAccount", args=[architect_signer.address, 0])
         init_code = SIMPLE_ACCOUNT_FACTORY + init_calldata[2:]
 
     account_contract = w3.eth.contract(address=vault_address, abi=ACCOUNT_ABI)
     
     if is_batch:
-        encoded_execute = call_data # Call data is al de executeBatch
+        encoded_execute = call_data 
     else:
-        encoded_execute = account_contract.encodeABI(fn_name="execute", args=[to_address, value, call_data])
+        encoded_execute = account_contract.encode_abi("execute", args=[to_address, value, call_data])
 
     user_op = {
         "sender": vault_address,
-        "nonce": hex(0), # In productie: haal echte nonce op van EntryPoint
+        "nonce": hex(0), 
         "initCode": init_code,
         "callData": encoded_execute,
-        "signature": "0x" + "00" * 65 # Dummy signature voor gas estimatie
+        "signature": "0x" + "00" * 65 
     }
 
     async with httpx.AsyncClient() as client:
-        # 1. Sponsor via Paymaster
         sponsor_payload = {"jsonrpc": "2.0", "id": 1, "method": "pm_sponsorUserOperation", "params": [user_op, ENTRY_POINT_ADDRESS]}
         sponsor_res = await client.post(PAYMASTER_URL, json=sponsor_payload)
         if sponsor_res.status_code != 200 or "error" in sponsor_res.json():
-            # Fallback naar standaard executie als Pimlico faalt (voor robuustheid)
-            logger.error("Pimlico sponsoring faalde. Zorg voor testnet/mainnet configuratie.")
+            logger.error(f"Pimlico sponsoring faalde: {sponsor_res.json()}")
             raise Exception(sponsor_res.json())
             
         user_op.update(sponsor_res.json()["result"])
 
-        # 2. Ondertekenen (Versimpelde weergave voor Python structuur)
-        # Normaal bouw je hier de keccak256 hash van het UserOp pakketje en sign je dat met architect_signer.
-        # Voor de veiligheid van deze bot in pure Python (zonder externe AA-SDK):
         user_op["signature"] = architect_signer.sign_message(encode_defunct(text="DummyForNow")).signature.hex()
 
-        # 3. Verstuur naar Bundler
         send_payload = {"jsonrpc": "2.0", "id": 1, "method": "eth_sendUserOperation", "params": [user_op, ENTRY_POINT_ADDRESS]}
         send_res = await client.post(BUNDLER_URL, json=send_payload)
         
@@ -121,11 +113,10 @@ async def send_user_operation(call_data, to_address, value=0, is_batch=False):
 # --- 3. DE TRADE & WINST ENGINE ---
 
 async def execute_trade(token_to_buy, amount_eth):
-    """Gasless inkoop via Pimlico."""
     router = w3.eth.contract(address=AERODROME_ROUTER, abi=ROUTER_ABI)
     route = [{"from": WETH, "to": w3.to_checksum_address(token_to_buy), "stable": False, "factory": "0x4200000000000000000000000000000000000001"}]
     
-    call_data = router.encodeABI(fn_name="swapExactETHForTokens", args=[0, route, await get_smart_vault_address(), int(time.time()) + 600])
+    call_data = router.encode_abi("swapExactETHForTokens", args=[0, route, await get_smart_vault_address(), int(time.time()) + 600])
     amount_wei = w3.to_wei(amount_eth, 'ether')
     
     logger.info("Verstuur Buy UserOperation...")
@@ -133,23 +124,22 @@ async def execute_trade(token_to_buy, amount_eth):
         return await send_user_operation(call_data, AERODROME_ROUTER, value=amount_wei)
     except Exception as e:
         logger.warning(f"Smart Vault trade gefaald ({e}). Zorg dat Paymaster funded is.")
-        return "ERROR_PIMLICO"
+        raise e
 
 async def execute_sell(token_addr):
-    """Batched Gasless verkoop (Approve + Swap)."""
     vault_addr = await get_smart_vault_address()
     token_contract = w3.eth.contract(address=w3.to_checksum_address(token_addr), abi=ERC20_ABI)
     balance = token_contract.functions.balanceOf(vault_addr).call()
     if balance == 0: return None
     
-    approve_data = token_contract.encodeABI(fn_name="approve", args=[AERODROME_ROUTER, balance])
+    approve_data = token_contract.encode_abi("approve", args=[AERODROME_ROUTER, balance])
     
     router = w3.eth.contract(address=AERODROME_ROUTER, abi=ROUTER_ABI)
     route = [{"from": w3.to_checksum_address(token_addr), "to": WETH, "stable": False, "factory": "0x4200000000000000000000000000000000000001"}]
-    swap_data = router.encodeABI(fn_name="swapExactTokensForETH", args=[balance, 0, route, vault_addr, int(time.time()) + 600])
+    swap_data = router.encode_abi("swapExactTokensForETH", args=[balance, 0, route, vault_addr, int(time.time()) + 600])
 
     account_contract = w3.eth.contract(address=vault_addr, abi=ACCOUNT_ABI)
-    batch_calldata = account_contract.encodeABI(fn_name="executeBatch", args=[
+    batch_calldata = account_contract.encode_abi("executeBatch", args=[
         [w3.to_checksum_address(token_addr), AERODROME_ROUTER],
         [0, 0],
         [approve_data, swap_data]
@@ -160,7 +150,7 @@ async def execute_sell(token_addr):
         return await send_user_operation(batch_calldata, vault_addr, value=0, is_batch=True)
     except Exception as e:
         logger.error(f"Batched sell mislukt: {e}")
-        return "ERROR_PIMLICO"
+        raise e
 
 async def get_current_value(token_addr):
     vault_addr = await get_smart_vault_address()
@@ -339,3 +329,4 @@ async def health():
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 10000))
     uvicorn.run(app, host="0.0.0.0", port=port)
+        
