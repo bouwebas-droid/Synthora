@@ -1,13 +1,19 @@
-# --- 1. BOVENAAN: IMPORTS ---
+        # --- 1. BOVENAAN: IMPORTS ---
 import logging
 import os
 import asyncio
-import threading
-from fastapi import FastAPI, Header, HTTPException
-from pydantic import BaseModel
-from web3 import Web3
-from eth_account import Account
+from fastapi import FastAPI
 import uvicorn
+
+# Coinbase AgentKit & LangChain (Jouw eigen API's)
+from coinbase_agentkit import (
+    AgentKit,
+    AgentKitConfig,
+    CdpWalletProvider,
+    CdpWalletProviderConfig
+)
+from coinbase_agentkit_langchain import get_langchain_tools
+from langchain_openai import ChatOpenAI
 from telegram import Update
 from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes
 
@@ -15,73 +21,88 @@ from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("Synthora")
 
-BASE_RPC_URL = "https://mainnet.base.org"
-w3 = Web3(Web3.HTTPProvider(BASE_RPC_URL))
-
-# Keys ophalen uit Render Environment Variables
+# API Sleutels uit je Render Environment Variables
+CDP_API_KEY_NAME = os.environ.get("CDP_API_KEY_NAME")
+# Zorg dat de private key correct wordt ingeladen (new-line fix)
+CDP_PRIVATE_KEY = os.environ.get("CDP_API_KEY_PRIVATE_KEY", "").replace('\\n', '\n')
+OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY")
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
 OWNER_ID = int(os.environ.get("OWNER_ID", 0))
-session_key_hex = os.environ.get("ARCHITECT_SESSION_KEY")
 
-if session_key_hex:
-    architect_account = Account.from_key(session_key_hex)
-else:
-    logger.warning("Geen Session Key gevonden. /skyline zal geen balans tonen.")
-    architect_account = None
+# --- 2. DE AGENT INITIALISEREN (CDP + OPENAI) ---
+def setup_architect():
+    """Initialiseert de CDP Wallet en de AI hersenen."""
+    if not all([CDP_API_KEY_NAME, CDP_PRIVATE_KEY, OPENAI_API_KEY]):
+        logger.warning("⚠️ Let op: CDP of OpenAI keys missen. Agent draait in beperkte modus.")
+        return None, None, None
 
-# --- 2. DE BOT COMMANDO'S ---
+    # Wallet Provider (Rechtstreekse on-chain toegang op Base)
+    wallet_provider = CdpWalletProvider(CdpWalletProviderConfig(
+        api_key_id=CDP_API_KEY_NAME,
+        api_key_secret=CDP_PRIVATE_KEY,
+        network_id="base-mainnet"
+    ))
+    
+    # AgentKit (De gereedschapskist)
+    agent_kit = AgentKit(AgentKitConfig(wallet_provider=wallet_provider))
+    
+    # OpenAI (De intelligentie)
+    llm = ChatOpenAI(model="gpt-4o", api_key=OPENAI_API_KEY)
+    
+    return wallet_provider, agent_kit, llm
+
+wallet, agent, llm = setup_architect()
+
+# --- 3. DE BOT COMMANDO'S ---
 
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Commando: /start"""
     if update.effective_user.id == OWNER_ID:
-        await update.message.reply_text("🏗️ **De Architect is online.**\nDe Skyline van Base is stabiel. Gebruik /skyline voor een on-chain scan.")
+        await update.message.reply_text("🏗️ **De Architect is online.**\nJouw on-chain commando's staan klaar.")
     else:
         await update.message.reply_text("Toegang geweigerd.")
 
-async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Commando: /status"""
-    if update.effective_user.id == OWNER_ID:
-        block = w3.eth.block_number
-        await update.message.reply_text(f"📊 **Synthora Status Rapport**\n• Netwerk: Base Mainnet\n• Huidig Block: {block}\n• Status: Operationeel")
-
 async def skyline_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Commando: /skyline - De Architect analyseert de horizon"""
-    if update.effective_user.id != OWNER_ID:
-        await update.message.reply_text("Onbevoegde toegang geweigerd.")
-        return
-
-    await update.message.reply_chat_action("typing")
+    """Directe balans-check via CDP Wallet."""
+    if update.effective_user.id != OWNER_ID: return
     
+    await update.message.reply_chat_action("typing")
     try:
-        # 1. Netwerk data ophalen
-        gas_price_gwei = w3.from_wei(w3.eth.gas_price, 'gwei')
-        block_number = w3.eth.block_number
+        balance = wallet.balance("eth") if wallet else "Onbekend"
+        addr = wallet.address if wallet else "Niet geladen"
         
-        # 2. Balans ophalen van je 'brandstof'
-        balance_eth = 0
-        if architect_account:
-            balance_wei = w3.eth.get_balance(architect_account.address)
-            balance_eth = w3.from_wei(balance_wei, 'ether')
-
-        # 3. Rapport opstellen
-        rapport = (
-            "🏙️ **Synthora Skyline Report**\n"
-            "───────────────────\n"
-            f"🌐 **Netwerk:** Base Mainnet\n"
-            f"📦 **Block:** `{block_number}`\n"
-            f"⛽ **Gas Prijs:** `{gas_price_gwei:.4f} Gwei`\n"
-            "───────────────────\n"
-            f"💳 **Agent Wallet:** `{balance_eth:.5f} ETH`\n\n"
-            "Status: *De skyline is helder. Sensoren op 100%.*"
+        await update.message.reply_text(
+            f"🏙️ **Synthora Skyline Scan**\n"
+            f"📍 **Adres:** `{addr}`\n"
+            f"💳 **Balans:** `{balance} ETH`", 
+            parse_mode='Markdown'
         )
-        
-        await update.message.reply_text(rapport, parse_mode='Markdown')
-        
     except Exception as e:
-        logger.error(f"Skyline Scan fout: {e}")
-        await update.message.reply_text("⚠️ De Skyline is momenteel gehuld in mist.")
+        await update.message.reply_text(f"⚠️ Fout bij scan: {str(e)}")
 
-# --- 3. DE BOT RUNNER (v22.6) ---
+# --- SECRET COMMANDS (Alleen voor de eigenaar) ---
+
+async def weekly_report_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Genereert het exclusieve Skyline Report via de AI."""
+    if update.effective_user.id != OWNER_ID:
+        return # Reageert niet op anderen
+
+    await update.message.reply_text("📊 **Secret Command geactiveerd: Weekly Skyline Report genereren...**")
+    await update.message.reply_chat_action("typing")
+
+    try:
+        # Hier vragen we de AI om een analyse van de wallet/status
+        # In een later stadium kunnen we hier on-chain data aan de prompt voeren
+        prompt = "Genereer een kort, professioneel weekoverzicht voor de Synthora Architect op Base."
+        ai_response = llm.invoke(prompt)
+        
+        await update.message.reply_text(
+            f"📑 **WEEKLY SKYLINE REPORT**\n\n{ai_response.content}\n\n*Eigenaar geautoriseerd.*", 
+            parse_mode='Markdown'
+        )
+    except Exception as e:
+        await update.message.reply_text("⚠️ Het rapport kon niet worden opgesteld.")
+
+# --- 4. DE RUNNER (Telegram + FastAPI) ---
 
 async def run_telegram_bot():
     if not TELEGRAM_TOKEN:
@@ -92,26 +113,24 @@ async def run_telegram_bot():
     
     # Handlers registreren
     application.add_handler(CommandHandler("start", start_command))
-    application.add_handler(CommandHandler("status", status_command))
     application.add_handler(CommandHandler("skyline", skyline_command))
+    # Registratie van het Secret Command
+    application.add_handler(CommandHandler("weekly_report", weekly_report_command))
     
     await application.initialize()
     await application.start()
     await application.updater.start_polling()
     
-    logger.info("[SYSTEM] Synthora Bot is actief en luistert.")
+    logger.info("[SYSTEM] Synthora Agent is operationeel.")
     while True:
         await asyncio.sleep(3600)
 
-# --- 4. API ENDPOINTS ---
-
-app = FastAPI(title="De Architect - Command Center")
+# FastAPI voor Render Health Checks
+app = FastAPI(title="Synthora Architect")
 
 @app.get("/")
-async def health_check():
-    return {"status": "online", "agent": "Synthora", "location": "Base Skyline"}
-
-# --- 5. STARTUP ---
+async def health():
+    return {"status": "online", "agent": "Architect", "provider": "CDP SDK"}
 
 @app.on_event("startup")
 async def startup_event():
