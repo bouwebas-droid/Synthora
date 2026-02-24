@@ -243,9 +243,7 @@ async def get_gas_params() -> dict:
 #  TRANSACTIE ENGINE — volledig async
 # =============================================================
 async def send_tx_async(tx: dict) -> str:
-    chain = await rpc_retry(lambda: aw3.eth.chain_id)
-    if chain != BASE_CHAIN_ID:
-        raise Exception(f"⛔ Chain mismatch! {chain}")
+    # Chain is al gecontroleerd bij opstarten — skip async chain check voor snelheid
 
     tx["nonce"]   = await rpc_retry(aw3.eth.get_transaction_count, signer.address, "pending")
     tx["chainId"] = BASE_CHAIN_ID
@@ -316,7 +314,7 @@ async def is_safe_token(token: str, pool: str, created_block: int = 0) -> bool:
     try:
         # Leeftijd check — zo vroeg mogelijk om onnodige calls te voorkomen
         if created_block > 0 and config["max_token_age_blocks"] > 0:
-            current = await rpc_retry(lambda: aw3.eth.block_number)
+            current = await aw3.eth.block_number
             age     = current - created_block
             if age > config["max_token_age_blocks"]:
                 logger.info(f"❌ Token te oud: {age} blocks")
@@ -474,4 +472,5 @@ async def sell_token(token: str, reden: str):
 
         await notify(
             f"{emoji} *POSITIE GESLOTEN — {reden}*\n\n"
-       
+            f"Token: `{token}`\n"
+            f"PnL: `{pnl_pct:+.1f}%` (`{pnl_et
