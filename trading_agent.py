@@ -473,4 +473,6 @@ async def sell_token(token: str, reden: str):
 
         _pnl   = stats["total_pnl"]
         _snipe = config["snipe_eth"]
-   
+   except Exception as e:
+        logger.error("[ERR] Verkoop mislukt %s: %s", token, e)
+        await notify("[WARN] Verkoop mislukt " + str(token[:12]) + chr(10) + str(e))
