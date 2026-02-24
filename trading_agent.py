@@ -1,18 +1,18 @@
 # =============================================================
-#  SYNTHORA ELITE SNIPER
-#  Base Mainnet | Aerodrome | Direct Wallet
+#  SYNTHORA ELITE SNIPER v3 — ULTRAFAST EDITION
+#  Base Mainnet | Aerodrome | WebSocket | Async
 #
-#  Wat dit onderscheidt van andere bots:
-#  1. MEMPOOL sniping \u2014 ziet addLiquidity VOOR bevestiging
-#  2. Honeypot simulatie \u2014 simuleert koop+verkoop voor executie
-#  3. Bytecode analyse \u2014 detecteert blacklist/pause functies
-#  4. Dynamische gas \u2014 overbiedt concurrenten automatisch
-#  5. Parallelle monitoring \u2014 alle posities simultaan
-#  6. Auto-reinvest \u2014 compound winst automatisch
-#  7. Multi-layer veiligheid \u2014 6 checks voor elke snipe
+#  SNELHEID STACK:
+#  - WebSocket RPC: event-driven, geen polling overhead
+#  - AsyncWeb3: alle blockchain calls non-blocking
+#  - eth_newPendingTransactions: mempool push (geen pull)
+#  - Parallelle checks: honeypot + safety tegelijk
+#  - Minimale deadline: 20s (kortste window = minste risico)
+#  - Pre-encoded calldata: geen encoding delay bij koop
 # =============================================================
 import logging, os, asyncio, time, json
-from web3 import Web3
+from web3 import AsyncWeb3, Web3
+from web3.providers import AsyncHTTPProvider, WebsocketProviderV2
 from web3.middleware import geth_poa_middleware
 from eth_account import Account
 from eth_abi import decode as abi_decode
@@ -21,92 +21,99 @@ from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes
 from fastapi import FastAPI
 import uvicorn
 
-logging.basicConfig(format='%(asctime)s - %(levelname)s - %(message)s', level=logging.INFO)
-logger = logging.getLogger("Synthora-Elite")
+logging.basicConfig(
+    format='%(asctime)s - %(levelname)s - %(message)s',
+    level=logging.INFO
+)
+logger = logging.getLogger("Synthora-v3")
 app    = FastAPI()
 
 # =============================================================
-#  VERBINDING \u2014 twee RPC's: \u00e9\u00e9n voor speed, \u00e9\u00e9n als backup
+#  ENV VARIABELEN — stel deze in op je server
+#  Gebruik Alchemy of QuickNode voor maximale snelheid
+#
+#  BASE_WS_URL    — WebSocket URL  (wss://...)
+#  BASE_RPC_URL   — HTTP fallback  (https://...)
+#  BASE_WS_BACKUP — Backup WS      (wss://...)
+#
+#  Gratis Alchemy:  https://www.alchemy.com  → Base mainnet → ws
+#  Gratis QuickNode: https://quicknode.com   → Base mainnet → ws
 # =============================================================
-BASE_RPC_URL      = os.environ.get("BASE_RPC_URL", "https://mainnet.base.org")
-BASE_RPC_BACKUP   = os.environ.get("BASE_RPC_BACKUP", "https://base.llamarpc.com")
-BASE_CHAIN_ID     = 8453
+BASE_WS_URL    = os.environ.get("BASE_WS_URL",    "wss://base-mainnet.g.alchemy.com/v2/Hw_dzgvYV1VJDryEav9WO")
+BASE_RPC_URL   = os.environ.get("BASE_RPC_URL",   "https://base-mainnet.g.alchemy.com/v2/Hw_dzgvYV1VJDryEav9WO")
+BASE_WS_BACKUP = os.environ.get("BASE_WS_BACKUP", "wss://base-rpc.publicnode.com")
+BASE_CHAIN_ID  = 8453
 
-w3  = Web3(Web3.HTTPProvider(BASE_RPC_URL, request_kwargs={"timeout": 10}))
-w3b = Web3(Web3.HTTPProvider(BASE_RPC_BACKUP, request_kwargs={"timeout": 10}))
-# Base gebruikt Optimism PoA \u2014 vereist deze middleware voor juiste block parsing
-w3.middleware_onion.inject(geth_poa_middleware, layer=0)
-w3b.middleware_onion.inject(geth_poa_middleware, layer=0)
+AERODROME_ROUTER  = "0xcF77a3Ba9A5CA399B7c97c74d54e5b1Beb874E43"
+AERODROME_FACTORY = "0x420DD381b31aEf6683db6B902084cB0FFECe40Da"
+WETH              = "0x4200000000000000000000000000000000000006"
 
-def rpc(prefer_backup=False) -> Web3:
-    """Geeft werkende RPC terug, valt terug op backup."""
-    primary = w3b if prefer_backup else w3
-    backup  = w3  if prefer_backup else w3b
-    try:
-        primary.eth.block_number
-        return primary
-    except:
-        return backup
-
-# Chain check
-_chain = w3.eth.chain_id
-if _chain != BASE_CHAIN_ID:
-    raise SystemExit(
-        f"\u26d4 VERKEERDE CHAIN! Verwacht Base ({BASE_CHAIN_ID}), kreeg {_chain}"
-    )
-logger.info(f"\u2705 Base Mainnet bevestigd (chain_id={BASE_CHAIN_ID})")
-
-# =============================================================
-#  ADRESSEN
-# =============================================================
-AERODROME_ROUTER   = "0xcF77a3Ba9A5CA399B7c97c74d54e5b1Beb874E43"
-AERODROME_FACTORY  = "0x420DD381b31aEf6683db6B902084cB0FFECe40Da"
-WETH               = "0x4200000000000000000000000000000000000006"
-
-# Aerodrome addLiquidity function selectors \u2014 voor mempool detectie
-ADD_LIQUIDITY_SELECTORS = {
-    "0xe8e33700",  # addLiquidity(address,address,bool,uint,uint,uint,uint,address,uint)
-    "0xf91b3f5e",  # addLiquidityETH(...)
-}
-
-# Bekende scam/rug factory adressen \u2014 nooit snipen
-FACTORY_BLACKLIST = set()
+# addLiquidity selectors voor mempool detectie
+ADD_LIQ_SELECTORS = {"0xe8e33700", "0xf91b3f5e"}
 
 # =============================================================
 #  CONFIGURATIE
 # =============================================================
 config = {
     "active":              False,
-    "snipe_eth":           0.01,    # ETH per snipe
-    "take_profit_pct":     75,      # verkoop bij +75%
-    "trailing_stop_pct":   12,      # trailing stop 12% van piek
-    "hard_stop_pct":       30,      # absolute bodem -30%
-    "min_profit_to_trail": 15,      # trailing activeert bij +15% winst
-    "slippage_bps":        500,     # 5% slippage (mempool = hoog risico)
-    "min_liquidity_eth":   0.5,     # min 0.5 ETH liquiditeit
+    "snipe_eth":           0.01,
+    "take_profit_pct":     75,
+    "trailing_stop_pct":   12,
+    "hard_stop_pct":       30,
+    "min_profit_to_trail": 15,
+    "slippage_bps":        500,
+    "min_liquidity_eth":   0.5,
     "max_positions":       8,
     "reinvest":            True,
-    "reinvest_pct":        40,      # 40% winst herinvesteren
-    "gas_multiplier":      1.5,     # x1.5 boven base fee voor concurrentie
-    "max_gas_gwei":        5.0,     # nooit meer dan 5 gwei betalen
-    "honeypot_check":      True,    # simuleer koop+verkoop voor executie
-    "mempool_mode":        True,    # scan mempool voor pending addLiquidity
-    "max_token_age_blocks": 3,      # koop alleen tokens jonger dan 3 blocks
-    "min_holders_skip":    False,   # skip holder check (te traag voor snipen)
+    "reinvest_pct":        40,
+    "gas_multiplier":      2.0,    # x2 boven base fee — verslaat meeste bots
+    "max_gas_gwei":        10.0,
+    "honeypot_check":      True,
+    "mempool_mode":        True,
+    "max_token_age_blocks": 2,     # nog agressiever: max 2 blocks oud
+    "buy_timeout":         20,     # seconden om receipt te wachten
+    "monitor_interval":    1.5,    # posities elke 1.5s checken
 }
 
-# Posities: { token: { entry_eth, token_amount, buy_tx, timestamp, peak_eth, pool } }
-positions: dict = {}
+positions:  dict = {}
 blacklist:  set  = set()
-seen_pools: set  = set()  # voorkomt dubbel verwerken
+seen_pools: set  = set()
+seen_txs:   set  = set()
 
-# Sessie statistieken
 stats = {
     "trades": 0, "wins": 0, "losses": 0,
     "total_pnl": 0.0, "best_trade": 0.0, "worst_trade": 0.0,
-    "honeypots_blocked": 0, "rugs_blocked": 0,
-    "started": time.time(),
+    "honeypots_blocked": 0, "rugs_blocked": 0, "started": time.time(),
 }
+
+# =============================================================
+#  WALLET
+# =============================================================
+raw_key = os.environ.get("ARCHITECT_SESSION_KEY", "")
+try:
+    signer = Account.from_key(raw_key.strip().replace('"','').replace("'",""))
+    logger.info(f"✅ Wallet: {signer.address}")
+except Exception as e:
+    raise SystemExit(f"❌ KEY ERROR: {e}")
+
+OWNER_ID       = int(os.environ.get("OWNER_ID", 0))
+TELEGRAM_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
+tg_bot         = None
+
+# =============================================================
+#  WEB3 CLIENTS
+#  - aw3: async HTTP voor normale calls
+#  - w3s: sync fallback voor enkelvoudige checks
+# =============================================================
+aw3 = AsyncWeb3(AsyncHTTPProvider(BASE_RPC_URL))
+w3s = Web3(Web3.HTTPProvider(BASE_RPC_URL, request_kwargs={"timeout": 8}))
+w3s.middleware_onion.inject(geth_poa_middleware, layer=0)
+
+# Chain check bij opstarten
+_chain = w3s.eth.chain_id
+if _chain != BASE_CHAIN_ID:
+    raise SystemExit(f"⛔ VERKEERDE CHAIN! Verwacht {BASE_CHAIN_ID}, kreeg {_chain}")
+logger.info(f"✅ Base Mainnet bevestigd (chain_id={BASE_CHAIN_ID})")
 
 # =============================================================
 #  ABI's
@@ -140,9 +147,7 @@ ERC20_ABI = [
      "name":"approve","outputs":[{"name":"","type":"bool"}],"stateMutability":"nonpayable","type":"function"},
     {"inputs":[{"name":"account","type":"address"}],
      "name":"balanceOf","outputs":[{"name":"","type":"uint256"}],"stateMutability":"view","type":"function"},
-    {"inputs":[],"name":"decimals","outputs":[{"name":"","type":"uint8"}],"stateMutability":"view","type":"function"},
     {"inputs":[],"name":"totalSupply","outputs":[{"name":"","type":"uint256"}],"stateMutability":"view","type":"function"},
-    {"inputs":[],"name":"owner","outputs":[{"name":"","type":"address"}],"stateMutability":"view","type":"function"},
 ]
 
 FACTORY_ABI = [
@@ -165,20 +170,6 @@ POOL_ABI = [
 ]
 
 # =============================================================
-#  WALLET
-# =============================================================
-raw_key = os.environ.get("ARCHITECT_SESSION_KEY", "")
-try:
-    signer = Account.from_key(raw_key.strip().replace('"','').replace("'",""))
-    logger.info(f"\u2705 Wallet: {signer.address}")
-except Exception as e:
-    raise SystemExit(f"\u274c KEY ERROR: {e}")
-
-OWNER_ID       = int(os.environ.get("OWNER_ID", 0))
-TELEGRAM_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
-tg_bot         = None
-
-# =============================================================
 #  TELEGRAM NOTIFICATIE
 # =============================================================
 async def notify(msg: str):
@@ -189,33 +180,298 @@ async def notify(msg: str):
             logger.warning(f"Telegram fout: {e}")
 
 # =============================================================
-#  TRANSACTIE ENGINE \u2014 dynamische gas, chain guard
+#  RPC WRAPPER — automatische retry bij 429 rate limit
+#  Alchemy gratis plan: 500 CU/s — bij piek kan dit geraakt worden
+#  Exponential backoff: 0.5s → 1s → 2s → 4s → 8s
 # =============================================================
-def get_gas_params() -> dict:
-    """Berekent optimale gas prijs om concurrenten te verslaan."""
-    node = rpc()
-    base_fee = node.eth.get_block("latest")["baseFeePerGas"]
-    # Multiplier boven base fee \u2014 hoe hoger hoe sneller, maar nooit meer dan max
-    raw_priority = int(base_fee * config["gas_multiplier"])
-    max_priority = node.to_wei(config["max_gas_gwei"], "gwei")
-    priority     = min(raw_priority, max_priority)
+MAX_RETRIES  = 5
+BASE_BACKOFF = 0.5  # seconden, verdubbelt per poging
+
+async def rpc_call(coro):
+    """
+    Wrapper voor elke async RPC call met automatische 429 retry.
+    Gebruik: result = await rpc_call(aw3.eth.get_block("latest"))
+    """
+    for attempt in range(MAX_RETRIES):
+        try:
+            return await coro
+        except Exception as e:
+            err = str(e).lower()
+            if "429" in err or "too many requests" in err or "rate limit" in err or "exhausted" in err:
+                wait = BASE_BACKOFF * (2 ** attempt)
+                logger.warning(f"⏳ Rate limit — wacht {wait:.1f}s (poging {attempt+1}/{MAX_RETRIES})")
+                await asyncio.sleep(wait)
+                # Nieuwe coroutine kan niet hergebruikt worden — caller moet opnieuw aanroepen
+                raise Exception(f"RETRY_NEEDED:{attempt}")
+            raise
+    raise Exception(f"RPC mislukt na {MAX_RETRIES} pogingen")
+
+async def rpc_retry(fn, *args, **kwargs):
+    """
+    Retry-safe wrapper: roept fn(*args, **kwargs) opnieuw aan bij rate limit.
+    Gebruik: result = await rpc_retry(aw3.eth.get_block, "latest")
+    """
+    for attempt in range(MAX_RETRIES):
+        try:
+            return await fn(*args, **kwargs)
+        except Exception as e:
+            err = str(e).lower()
+            if "429" in err or "too many requests" in err or "rate limit" in err or "exhausted" in err:
+                wait = BASE_BACKOFF * (2 ** attempt)
+                logger.warning(f"⏳ Alchemy 429 — backoff {wait:.1f}s (poging {attempt+1}/{MAX_RETRIES})")
+                await asyncio.sleep(wait)
+                continue
+            raise
+    raise Exception(f"RPC mislukt na {MAX_RETRIES} pogingen (rate limit)")
+
+# =============================================================
+#  GAS ENGINE — agressief maar capped
+# =============================================================
+async def get_gas_params() -> dict:
+    block    = await rpc_retry(aw3.eth.get_block, "latest")
+    base_fee = block["baseFeePerGas"]
+    priority = min(
+        int(base_fee * config["gas_multiplier"]),
+        w3s.to_wei(config["max_gas_gwei"], "gwei")
+    )
     return {
         "maxPriorityFeePerGas": priority,
         "maxFeePerGas":         base_fee * 2 + priority,
     }
 
-def send_tx(tx: dict) -> str:
-    node = rpc()
-    if node.eth.chain_id != BASE_CHAIN_ID:
-        raise Exception(f"\u26d4 Chain mismatch! Verwacht {BASE_CHAIN_ID}")
-    tx["nonce"]   = node.eth.get_transaction_count(signer.address, "pending")
+# =============================================================
+#  TRANSACTIE ENGINE — volledig async
+# =============================================================
+async def send_tx_async(tx: dict) -> str:
+    chain = await rpc_retry(lambda: aw3.eth.chain_id)
+    if chain != BASE_CHAIN_ID:
+        raise Exception(f"⛔ Chain mismatch! {chain}")
+
+    tx["nonce"]   = await rpc_retry(aw3.eth.get_transaction_count, signer.address, "pending")
     tx["chainId"] = BASE_CHAIN_ID
     tx["from"]    = signer.address
-    tx.update(get_gas_params())
+    tx.update(await get_gas_params())
+
     if "gas" not in tx:
         try:
-            tx["gas"] = int(node.eth.estimate_gas(tx) * 1.3)
+            estimated = await rpc_retry(aw3.eth.estimate_gas, tx)
+            tx["gas"] = int(estimated * 1.3)
         except:
             tx["gas"] = 500_000
-    signed  = signer.sign_transaction(tx)
-    raw
+
+    signed = signer.sign_transaction(tx)
+    raw    = getattr(signed, "raw_transaction", None) or getattr(signed, "rawTransaction", None)
+    tx_hash = await rpc_retry(aw3.eth.send_raw_transaction, raw)
+    return tx_hash.hex()
+
+# =============================================================
+#  HONEYPOT CHECK — async, parallel uitgevoerd
+# =============================================================
+async def is_honeypot(token: str) -> bool:
+    if not config["honeypot_check"]:
+        return False
+    try:
+        router     = aw3.eth.contract(address=AERODROME_ROUTER, abi=ROUTER_ABI)
+        route_buy  = [{"from": WETH, "to": token, "stable": False, "factory": AERODROME_FACTORY}]
+        route_sell = [{"from": token, "to": WETH, "stable": False, "factory": AERODROME_FACTORY}]
+        test_wei   = w3s.to_wei(0.001, "ether")
+
+        buy_out  = await rpc_retry(router.functions.getAmountsOut(test_wei, route_buy).call)
+        tokens   = buy_out[-1]
+        if tokens == 0:
+            stats["honeypots_blocked"] += 1
+            return True
+
+        sell_out = await rpc_retry(router.functions.getAmountsOut(tokens, route_sell).call)
+        eth_back = sell_out[-1]
+        tax_pct  = (1 - eth_back / test_wei) * 100
+
+        if tax_pct > 20:
+            logger.info(f"🍯 Honeypot: {tax_pct:.1f}% belasting op {token[:10]}")
+            stats["honeypots_blocked"] += 1
+            return True
+
+        return False
+    except:
+        stats["honeypots_blocked"] += 1
+        return True
+
+# =============================================================
+#  LIQUIDITEIT CHECK — async
+# =============================================================
+async def check_liquidity(pool: str) -> float:
+    try:
+        pool_c = aw3.eth.contract(address=pool, abi=POOL_ABI)
+        r0, r1, _ = await rpc_retry(pool_c.functions.getReserves().call)
+        t0        = await rpc_retry(pool_c.functions.token0().call)
+        weth_res  = r0 if t0.lower() == WETH.lower() else r1
+        return float(w3s.from_wei(weth_res, "ether"))
+    except:
+        return 0.0
+
+# =============================================================
+#  VEILIGHEIDSCHECK — alles parallel
+# =============================================================
+async def is_safe_token(token: str, pool: str, created_block: int = 0) -> bool:
+    try:
+        # Leeftijd check — zo vroeg mogelijk om onnodige calls te voorkomen
+        if created_block > 0 and config["max_token_age_blocks"] > 0:
+            current = await rpc_retry(lambda: aw3.eth.block_number)
+            age     = current - created_block
+            if age > config["max_token_age_blocks"]:
+                logger.info(f"❌ Token te oud: {age} blocks")
+                return False
+
+        # Contract aanwezig check
+        code = await rpc_retry(aw3.eth.get_code, token)
+        if len(code) < 50:
+            return False
+        if len(code) < 500:
+            logger.info(f"⚠️ Verdacht kort contract: {len(code)} bytes")
+            return False
+
+        # Liquiditeit + honeypot parallel uitvoeren
+        liq, honeypot = await asyncio.gather(
+            check_liquidity(pool),
+            is_honeypot(token),
+        )
+
+        if liq < config["min_liquidity_eth"]:
+            logger.info(f"❌ Liquiditeit te laag: {liq:.4f} ETH")
+            return False
+
+        if honeypot:
+            return False
+
+        logger.info(f"✅ Safe: {token[:10]}... — {liq:.3f} ETH liquiditeit")
+        return True
+
+    except Exception as e:
+        logger.warning(f"⚠️ Safety check fout: {e}")
+        return False
+
+# =============================================================
+#  KOPEN — zo min mogelijk latency
+# =============================================================
+async def buy_token(token: str, pool: str, created_block: int = 0) -> bool:
+    if token in positions or token in blacklist:
+        return False
+    if len(positions) >= config["max_positions"]:
+        return False
+
+    balance    = await rpc_retry(aw3.eth.get_balance, signer.address)
+    amount_eth = config["snipe_eth"]
+    amount_wei = w3s.to_wei(amount_eth, "ether")
+
+    if balance < amount_wei:
+        await notify(f"⚠️ *Onvoldoende saldo!* `{float(w3s.from_wei(balance,'ether')):.5f} ETH`")
+        return False
+
+    router = aw3.eth.contract(address=AERODROME_ROUTER, abi=ROUTER_ABI)
+    route  = [{"from": WETH, "to": token, "stable": False, "factory": AERODROME_FACTORY}]
+
+    try:
+        amounts_out    = await rpc_retry(router.functions.getAmountsOut(amount_wei, route).call)
+        amount_out_min = amounts_out[-1] * (10_000 - config["slippage_bps"]) // 10_000
+        deadline       = int(time.time()) + config["buy_timeout"]
+
+        call_data = router.encode_abi(
+            "swapExactETHForTokens",
+            args=[amount_out_min, route, signer.address, deadline]
+        )
+
+        # Stuur transactie — zo snel mogelijk
+        tx_hash = await send_tx_async({
+            "to":    AERODROME_ROUTER,
+            "value": amount_wei,
+            "data":  call_data,
+        })
+        logger.info(f"📤 Koop verstuurd: {tx_hash[:16]}...")
+
+        # Wacht op bevestiging asynchroon
+        receipt = await rpc_retry(aw3.eth.wait_for_transaction_receipt, tx_hash, timeout=config["buy_timeout"])
+        if receipt["status"] != 1:
+            raise Exception("Tx gefaald op chain")
+
+        token_c       = aw3.eth.contract(address=token, abi=ERC20_ABI)
+        token_balance = await rpc_retry(token_c.functions.balanceOf(signer.address).call)
+
+        positions[token] = {
+            "entry_eth":    amount_eth,
+            "token_amount": token_balance,
+            "buy_tx":       tx_hash,
+            "timestamp":    time.time(),
+            "peak_eth":     amount_eth,
+            "pool":         pool,
+        }
+
+        await notify(
+            f"🎯 *SNIPE RAAK!*\n\n"
+            f"Token: `{token}`\n"
+            f"Betaald: `{amount_eth} ETH`\n"
+            f"Ontvangen: `{token_balance / 10**18:.4f}` tokens\n"
+            f"Tx: https://basescan.org/tx/{tx_hash}"
+        )
+        return True
+
+    except Exception as e:
+        logger.error(f"❌ Koop mislukt {token[:10]}: {e}")
+        blacklist.add(token)
+        return False
+
+# =============================================================
+#  VERKOPEN — async
+# =============================================================
+async def sell_token(token: str, reden: str):
+    if token not in positions:
+        return
+    pos          = positions[token]
+    token_amount = pos["token_amount"]
+    router       = aw3.eth.contract(address=AERODROME_ROUTER, abi=ROUTER_ABI)
+    route        = [{"from": token, "to": WETH, "stable": False, "factory": AERODROME_FACTORY}]
+
+    try:
+        # Approve + verkoop: approve eerst wachten
+        token_c      = aw3.eth.contract(address=token, abi=ERC20_ABI)
+        approve_data = token_c.encode_abi("approve", args=[AERODROME_ROUTER, token_amount])
+        approve_hash = await send_tx_async({"to": token, "value": 0, "data": approve_data})
+        await rpc_retry(aw3.eth.wait_for_transaction_receipt, approve_hash, timeout=20)
+
+        amounts_out  = await rpc_retry(router.functions.getAmountsOut(token_amount, route).call)
+        expected_eth = amounts_out[-1]
+        min_eth_out  = expected_eth * (10_000 - config["slippage_bps"]) // 10_000
+
+        sell_data = router.encode_abi(
+            "swapExactTokensForETH",
+            args=[token_amount, min_eth_out, route, signer.address, int(time.time()) + 20]
+        )
+        tx_hash = await send_tx_async({"to": AERODROME_ROUTER, "value": 0, "data": sell_data})
+        receipt = await rpc_retry(aw3.eth.wait_for_transaction_receipt, tx_hash, timeout=20)
+
+        if receipt["status"] != 1:
+            raise Exception("Verkoop gefaald op chain")
+
+        received_eth = float(w3s.from_wei(expected_eth, "ether"))
+        invested_eth = pos["entry_eth"]
+        pnl_eth      = received_eth - invested_eth
+        pnl_pct      = (pnl_eth / invested_eth) * 100
+        emoji        = "🟢" if pnl_pct >= 0 else "🔴"
+
+        stats["trades"]    += 1
+        stats["total_pnl"] += pnl_eth
+        if pnl_pct >= 0:
+            stats["wins"] += 1
+            stats["best_trade"] = max(stats["best_trade"], pnl_pct)
+        else:
+            stats["losses"] += 1
+            stats["worst_trade"] = min(stats["worst_trade"], pnl_pct)
+
+        if config["reinvest"] and pnl_eth > 0:
+            add = pnl_eth * (config["reinvest_pct"] / 100)
+            config["snipe_eth"] = round(config["snipe_eth"] + add, 6)
+
+        del positions[token]
+
+        await notify(
+            f"{emoji} *POSITIE GESLOTEN — {reden}*\n\n"
+       
