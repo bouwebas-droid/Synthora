@@ -5,7 +5,11 @@
 # =============================================================
 import logging, os, asyncio, time
 from web3 import AsyncWeb3, Web3
-from web3.providers import AsyncHTTPProvider, WebsocketProviderV2
+from web3.providers import AsyncHTTPProvider
+try:
+    from web3.providers import WebsocketProviderV2
+except ImportError:
+    WebsocketProviderV2 = None
 from web3.middleware import geth_poa_middleware
 from eth_account import Account
 from eth_abi import decode as abi_decode
