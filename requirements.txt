@@ -1,9 +1,7 @@
-fastapi
-uvicorn
+web3>=6.0.0
+eth-abi>=4.0.0
 python-telegram-bot>=20.0
-coinbase-agentkit>=0.7.0
-coinbase-agentkit-langchain>=0.7.0
-langgraph
-langchain-openai
-langchain-core
-pydantic-settings
+fastapi>=0.100.0
+uvicorn>=0.23.0
+websockets>=11.0
+
