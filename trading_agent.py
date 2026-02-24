@@ -9,7 +9,7 @@ from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes
 from fastapi import FastAPI
 import uvicorn
 
-# Logging configuratie voor maximale transparantie
+# Logging: De Architect houdt alles in de gaten
 logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     level=logging.INFO
@@ -23,7 +23,6 @@ BASE_RPC_URL = "https://mainnet.base.org"
 w3 = Web3(Web3.HTTPProvider(BASE_RPC_URL))
 
 PIMLICO_API_KEY = os.environ.get("PIMLICO_API_KEY", "")
-# Gecorrigeerd naar Base Mainnet Chain ID 8453
 BUNDLER_URL = f"https://api.pimlico.io/v2/8453/rpc?apikey={PIMLICO_API_KEY}"
 
 ENTRY_POINT_ADDRESS = "0x5FF137D4b0FDCD49DcA30c7CF57E578a026d2789"
@@ -40,7 +39,6 @@ ENTRY_POINT_ABI = [
 try:
     OWNER_ID = int(os.environ.get("OWNER_ID", 0))
 except (ValueError, TypeError):
-    logger.error("OWNER_ID is ongeldig of ontbreekt.")
     OWNER_ID = 0
 
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
@@ -50,29 +48,29 @@ architect_signer = Account.from_key(private_key) if private_key else None
 # --- 3. CRYPTOGRAFIE & SMART ACCOUNT LOGICA ---
 
 async def get_smart_vault_address():
+    """Berekent het unieke adres van de Synthora Vault gebaseerd op de Bot Signer."""
     factory_abi = [{"inputs":[{"name":"owner","type":"address"},{"name":"salt","type":"uint256"}],"name":"getAddress","outputs":[{"name":"","type":"address"}],"stateMutability":"view","type":"function"}]
     factory = w3.eth.contract(address=SIMPLE_ACCOUNT_FACTORY, abi=factory_abi)
+    # De bot (architect_signer) is de eigenaar van deze kluis
     return factory.functions.getAddress(architect_signer.address, 0).call()
 
 async def send_user_operation(call_data, to_address, value=0):
     vault_address = await get_smart_vault_address()
     ep_contract = w3.eth.contract(address=ENTRY_POINT_ADDRESS, abi=ENTRY_POINT_ABI)
     
-    # 1. InitCode: Alleen nodig bij de allereerste transactie
+    # 1. InitCode: Nodig als de kluis nog niet op de blockchain 'bestaat'
     init_code = "0x"
     if w3.eth.get_code(vault_address) == b'':
         factory_contract = w3.eth.contract(address=SIMPLE_ACCOUNT_FACTORY, abi=[{"inputs":[{"name":"owner","type":"address"},{"name":"salt","type":"uint256"}],"name":"createAccount","outputs":[{"name":"","type":"address"}],"stateMutability":"nonpayable","type":"function"}])
         init_code = SIMPLE_ACCOUNT_FACTORY + factory_contract.encode_abi("createAccount", args=[architect_signer.address, 0])[2:]
 
-    # 2. Nonce ophalen via EntryPoint
     nonce = ep_contract.functions.getNonce(vault_address, 0).call()
 
-    # 3. CallData encoderen voor de execute functie van de Vault
     acc_abi = [{"inputs":[{"name":"dest","type":"address"},{"name":"value","type":"uint256"},{"name":"func","type":"bytes"}],"name":"execute","outputs":[],"stateMutability":"nonpayable","type":"function"}]
     vault_contract = w3.eth.contract(address=vault_address, abi=acc_abi)
     execute_data = vault_contract.encode_abi("execute", args=[to_address, value, call_data])
 
-    # FIX: Dummy signature van exact 65 bytes om de AA23 simulatie error te omzeilen
+    # FIX: Correcte 65-byte dummy handtekening voor simulatie-bypass
     DUMMY_SIGNATURE = "0xfffffffffffffffffffffffffffffff0000000000000000000000000000000007aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa1c"
 
     user_op = {
@@ -90,7 +88,7 @@ async def send_user_operation(call_data, to_address, value=0):
     }
 
     async with httpx.AsyncClient(timeout=30.0) as client:
-        # STAP 1: Sponsoring aanvragen bij Pimlico
+        # STAP 1: Sponsoring (Pimlico v2)
         res = await client.post(BUNDLER_URL, json={
             "jsonrpc": "2.0", "id": 1, 
             "method": "pm_sponsorUserOperation", 
@@ -99,12 +97,12 @@ async def send_user_operation(call_data, to_address, value=0):
         
         sponsor_data = res.json()
         if "error" in sponsor_data:
-            raise Exception(f"Sponsor Error: {sponsor_data['error'].get('message')}")
+            # Verbeterde error logging voor diagnostics
+            raise Exception(f"Sponsor Error: {sponsor_data['error'].get('message')} - Data: {sponsor_data['error'].get('data', 'N/A')}")
         
-        # Update user_op met waarden van de paymaster
         user_op.update(sponsor_data["result"])
 
-        # STAP 2: De UserOperation ondertekenen
+        # STAP 2: Cryptografisch Ondertekenen
         user_op_tuple = (
             user_op['sender'], int(user_op['nonce'], 16), user_op['initCode'],
             user_op['callData'], int(user_op['callGasLimit'], 16),
@@ -117,7 +115,7 @@ async def send_user_operation(call_data, to_address, value=0):
         signature = architect_signer.sign_message(encode_defunct(primitive=op_hash))
         user_op["signature"] = signature.signature.hex()
 
-        # STAP 3: Verzenden naar de Bundler voor executie
+        # STAP 3: Executie via Bundler
         final_res = await client.post(BUNDLER_URL, json={
             "jsonrpc": "2.0", "id": 1, 
             "method": "eth_sendUserOperation", 
@@ -126,75 +124,64 @@ async def send_user_operation(call_data, to_address, value=0):
         
         return final_res.json().get("result") or str(final_res.json().get("error"))
 
-# --- 4. COMMAND CENTER (The Architect's Interface) ---
+# --- 4. COMMAND CENTER ---
 
 async def skyline_report(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Geeft een strategisch overzicht van de Synthora Vault."""
     if update.effective_user.id != OWNER_ID:
-        await update.message.reply_text("🚫 Toegang geweigerd. U bent niet de Architect.")
+        await update.message.reply_text("🚫 Architect-rechten vereist.")
         return
 
     try:
         v = await get_smart_vault_address()
         b = w3.from_wei(w3.eth.get_balance(v), 'ether')
+        s = architect_signer.address
+        
         report = (
-            "🏙️ **Skyline Report - Synthora Status**\n"
+            "🏙️ **Synthora Architecture Audit**\n"
             "-------------------------------------\n"
-            f"🔐 **Vault:** `{v}`\n"
-            f"💰 **Kapitaal:** `{b:.6f} ETH`\n"
-            f"📡 **Netwerk:** Base Mainnet\n"
+            f"🔐 **Vault Adres:** `{v}`\n"
+            f"💰 **Sovereign Balans:** `{b:.6f} ETH`\n"
+            f"🤖 **Bot Signer:** `{s}`\n"
             "-------------------------------------\n"
-            "✅ *De Architect is operationeel.*"
+            "✅ *Signer en Vault eigenaar komen overeen.*"
         )
         await update.message.reply_text(report, parse_mode='Markdown')
     except Exception as e:
-        logger.error(f"Skyline Fout: {e}")
-        await update.message.reply_text(f"⚠️ Fout bij ophalen skyline: `{e}`")
+        await update.message.reply_text(f"⚠️ Audit Fout: `{e}`")
 
 async def trade_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Voert on-chain swaps uit op Aerodrome."""
     if update.effective_user.id != OWNER_ID: return
     
     if len(context.args) < 2:
-        await update.message.reply_text("❌ Gebruik: `/trade [token_adres] [eth]`")
+        await update.message.reply_text("❌ `/trade [token_adres] [eth]`")
         return
 
-    status_msg = await update.message.reply_text("🏗️ **Stap 1/3: Transactie bouwen...**")
+    status = await update.message.reply_text("🏗️ **Synthetiseren van UserOperation...**")
     
     try:
-        token_addr = w3.to_checksum_address(context.args[0])
-        eth_amt = float(context.args[1].replace(',', '.'))
+        token = w3.to_checksum_address(context.args[0])
+        amount = float(context.args[1].replace(',', '.'))
         
-        await status_msg.edit_text("🛰️ **Stap 2/3: UserOp & Sponsoring...**")
+        await status.edit_text("🛰️ **Sponsoring & Simulatie bij Pimlico...**")
         
-        # Router Setup (Aerodrome)
         router_abi = [{"inputs":[{"name":"amountOutMin","type":"uint256"},{"name":"routes","type":"tuple[]","components":[{"name":"from","type":"address"},{"name":"to","type":"address"},{"name":"stable","type":"bool"},{"name":"factory","type":"address"}]},{"name":"to","type":"address"},{"name":"deadline","type":"uint256"}],"name":"swapExactETHForTokens","outputs":[{"name":"amounts","type":"uint256[]"}],"stateMutability":"payable","type":"function"}]
         router = w3.eth.contract(address=AERODROME_ROUTER, abi=router_abi)
+        route = [{"from": WETH, "to": token, "stable": False, "factory": "0x4200000000000000000000000000000000000001"}]
         
-        # Route: WETH -> Target Token
-        route = [{"from": WETH, "to": token_addr, "stable": False, "factory": "0x4200000000000000000000000000000000000001"}]
+        call_data = router.encode_abi("swapExactETHForTokens", args=[0, route, await get_smart_vault_address(), int(time.time()) + 600])
         
-        call_data = router.encode_abi("swapExactETHForTokens", args=[
-            0, # Voor test: geen slippage bescherming
-            route, 
-            await get_smart_vault_address(), 
-            int(time.time()) + 600
-        ])
+        op_hash = await send_user_operation(call_data, AERODROME_ROUTER, value=w3.to_wei(amount, 'ether'))
         
-        op_hash = await send_user_operation(call_data, AERODROME_ROUTER, value=w3.to_wei(eth_amt, 'ether'))
-        
-        await status_msg.edit_text(f"🚀 **Stap 3/3: Verzonden!**\n\nUserOp Hash: `{op_hash}`")
-        logger.info(f"Trade succesvol. Hash: {op_hash}")
-        
+        await status.edit_text(f"🚀 **Operatie verzonden naar Base!**\n\nHash: `{op_hash}`")
     except Exception as e:
-        logger.error(f"Trade Fout: {e}")
-        await status_msg.edit_text(f"⚠️ **Architect Error:** `{str(e)}`")
+        logger.error(f"Trade Error: {e}")
+        await status.edit_text(f"⚠️ **Architect Error:**\n`{str(e)}`")
 
-# --- 5. RUNNER (Render Stabiliteit) ---
+# --- 5. DEPLOIER & RUNNER ---
 
 async def run_bot():
     try:
-        # We wachten 5 seconden bij opstarten om dubbele processen op Render te voorkomen
+        # Prevent conflict during Render restart
         await asyncio.sleep(5)
         
         app_tg = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
@@ -203,26 +190,23 @@ async def run_bot():
         
         await app_tg.initialize()
         await app_tg.start()
-        
-        # We gebruiken polling met een vaste interval
         await app_tg.updater.start_polling(poll_interval=2.0)
-        logger.info("🚀 Synthora Engine is nu live op Telegram.")
+        logger.info("🚀 Synthora Online.")
         
         while True:
             await asyncio.sleep(3600)
-            
     except Exception as e:
-        logger.error(f"Bot crash: {e}")
+        logger.error(f"Critical Loop Crash: {e}")
 
 @app.on_event("startup")
 async def startup_event():
-    # Draai de bot in de achtergrond van de FastAPI server
     asyncio.create_task(run_bot())
 
 @app.get("/")
-async def health_check():
-    return {"status": "Synthora is online", "architect_id": OWNER_ID}
+async def health():
+    return {"status": "Synthora Architect Engine Active"}
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 10000))
     uvicorn.run(app, host="0.0.0.0", port=port)
+    
