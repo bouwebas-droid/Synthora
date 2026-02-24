@@ -1,5 +1,6 @@
+# -*- coding: utf-8 -*-
 # =============================================================
-#  SYNTHORA ELITE SNIPER v3 — ULTRAFAST EDITION
+#  SYNTHORA ELITE SNIPER v3 - ULTRAFAST EDITION
 #  Base Mainnet | Aerodrome | WebSocket | Async
 #
 #  SNELHEID STACK:
@@ -29,12 +30,12 @@ logger = logging.getLogger("Synthora-v3")
 app    = FastAPI()
 
 # =============================================================
-#  ENV VARIABELEN — stel deze in op je server
+#  ENV VARIABELEN - stel deze in op je server
 #  Gebruik Alchemy of QuickNode voor maximale snelheid
 #
-#  BASE_WS_URL    — WebSocket URL  (wss://...)
-#  BASE_RPC_URL   — HTTP fallback  (https://...)
-#  BASE_WS_BACKUP — Backup WS      (wss://...)
+#  BASE_WS_URL    - WebSocket URL  (wss://...)
+#  BASE_RPC_URL   - HTTP fallback  (https://...)
+#  BASE_WS_BACKUP - Backup WS      (wss://...)
 #
 #  Gratis Alchemy:  https://www.alchemy.com  → Base mainnet → ws
 #  Gratis QuickNode: https://quicknode.com   → Base mainnet → ws
@@ -66,7 +67,7 @@ config = {
     "max_positions":       8,
     "reinvest":            True,
     "reinvest_pct":        40,
-    "gas_multiplier":      2.0,    # x2 boven base fee — verslaat meeste bots
+    "gas_multiplier":      2.0,    # x2 boven base fee - verslaat meeste bots
     "max_gas_gwei":        10.0,
     "honeypot_check":      True,
     "mempool_mode":        True,
@@ -92,9 +93,9 @@ stats = {
 raw_key = os.environ.get("ARCHITECT_SESSION_KEY", "")
 try:
     signer = Account.from_key(raw_key.strip().replace('"','').replace("'",""))
-    logger.info(f"✅ Wallet: {signer.address}")
+    logger.info(f"[OK] Wallet: {signer.address}")
 except Exception as e:
-    raise SystemExit(f"❌ KEY ERROR: {e}")
+    raise SystemExit(f"[ERR] KEY ERROR: {e}")
 
 OWNER_ID       = int(os.environ.get("OWNER_ID", 0))
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
@@ -112,8 +113,8 @@ w3s.middleware_onion.inject(geth_poa_middleware, layer=0)
 # Chain check bij opstarten
 _chain = w3s.eth.chain_id
 if _chain != BASE_CHAIN_ID:
-    raise SystemExit(f"⛔ VERKEERDE CHAIN! Verwacht {BASE_CHAIN_ID}, kreeg {_chain}")
-logger.info(f"✅ Base Mainnet bevestigd (chain_id={BASE_CHAIN_ID})")
+    raise SystemExit(f"[STOP] VERKEERDE CHAIN! Verwacht {BASE_CHAIN_ID}, kreeg {_chain}")
+logger.info(f"[OK] Base Mainnet bevestigd (chain_id={BASE_CHAIN_ID})")
 
 # =============================================================
 #  ABI's
@@ -180,8 +181,8 @@ async def notify(msg: str):
             logger.warning(f"Telegram fout: {e}")
 
 # =============================================================
-#  RPC WRAPPER — automatische retry bij 429 rate limit
-#  Alchemy gratis plan: 500 CU/s — bij piek kan dit geraakt worden
+#  RPC WRAPPER - automatische retry bij 429 rate limit
+#  Alchemy gratis plan: 500 CU/s - bij piek kan dit geraakt worden
 #  Exponential backoff: 0.5s → 1s → 2s → 4s → 8s
 # =============================================================
 MAX_RETRIES  = 5
@@ -199,9 +200,9 @@ async def rpc_call(coro):
             err = str(e).lower()
             if "429" in err or "too many requests" in err or "rate limit" in err or "exhausted" in err:
                 wait = BASE_BACKOFF * (2 ** attempt)
-                logger.warning(f"⏳ Rate limit — wacht {wait:.1f}s (poging {attempt+1}/{MAX_RETRIES})")
+                logger.warning(f"[WAIT] Rate limit - wacht {wait:.1f}s (poging {attempt+1}/{MAX_RETRIES})")
                 await asyncio.sleep(wait)
-                # Nieuwe coroutine kan niet hergebruikt worden — caller moet opnieuw aanroepen
+                # Nieuwe coroutine kan niet hergebruikt worden - caller moet opnieuw aanroepen
                 raise Exception(f"RETRY_NEEDED:{attempt}")
             raise
     raise Exception(f"RPC mislukt na {MAX_RETRIES} pogingen")
@@ -218,14 +219,14 @@ async def rpc_retry(fn, *args, **kwargs):
             err = str(e).lower()
             if "429" in err or "too many requests" in err or "rate limit" in err or "exhausted" in err:
                 wait = BASE_BACKOFF * (2 ** attempt)
-                logger.warning(f"⏳ Alchemy 429 — backoff {wait:.1f}s (poging {attempt+1}/{MAX_RETRIES})")
+                logger.warning(f"[WAIT] Alchemy 429 - backoff {wait:.1f}s (poging {attempt+1}/{MAX_RETRIES})")
                 await asyncio.sleep(wait)
                 continue
             raise
     raise Exception(f"RPC mislukt na {MAX_RETRIES} pogingen (rate limit)")
 
 # =============================================================
-#  GAS ENGINE — agressief maar capped
+#  GAS ENGINE - agressief maar capped
 # =============================================================
 async def get_gas_params() -> dict:
     block    = await rpc_retry(aw3.eth.get_block, "latest")
@@ -240,10 +241,10 @@ async def get_gas_params() -> dict:
     }
 
 # =============================================================
-#  TRANSACTIE ENGINE — volledig async
+#  TRANSACTIE ENGINE - volledig async
 # =============================================================
 async def send_tx_async(tx: dict) -> str:
-    # Chain is al gecontroleerd bij opstarten — skip async chain check voor snelheid
+    # Chain is al gecontroleerd bij opstarten - skip async chain check voor snelheid
 
     tx["nonce"]   = await rpc_retry(aw3.eth.get_transaction_count, signer.address, "pending")
     tx["chainId"] = BASE_CHAIN_ID
@@ -263,7 +264,7 @@ async def send_tx_async(tx: dict) -> str:
     return tx_hash.hex()
 
 # =============================================================
-#  HONEYPOT CHECK — async, parallel uitgevoerd
+#  HONEYPOT CHECK - async, parallel uitgevoerd
 # =============================================================
 async def is_honeypot(token: str) -> bool:
     if not config["honeypot_check"]:
@@ -285,7 +286,7 @@ async def is_honeypot(token: str) -> bool:
         tax_pct  = (1 - eth_back / test_wei) * 100
 
         if tax_pct > 20:
-            logger.info(f"🍯 Honeypot: {tax_pct:.1f}% belasting op {token[:10]}")
+            logger.info(f"[HONEYPOT] Honeypot: {tax_pct:.1f}% belasting op {token[:10]}")
             stats["honeypots_blocked"] += 1
             return True
 
@@ -295,7 +296,7 @@ async def is_honeypot(token: str) -> bool:
         return True
 
 # =============================================================
-#  LIQUIDITEIT CHECK — async
+#  LIQUIDITEIT CHECK - async
 # =============================================================
 async def check_liquidity(pool: str) -> float:
     try:
@@ -308,16 +309,16 @@ async def check_liquidity(pool: str) -> float:
         return 0.0
 
 # =============================================================
-#  VEILIGHEIDSCHECK — alles parallel
+#  VEILIGHEIDSCHECK - alles parallel
 # =============================================================
 async def is_safe_token(token: str, pool: str, created_block: int = 0) -> bool:
     try:
-        # Leeftijd check — zo vroeg mogelijk om onnodige calls te voorkomen
+        # Leeftijd check - zo vroeg mogelijk om onnodige calls te voorkomen
         if created_block > 0 and config["max_token_age_blocks"] > 0:
             current = await aw3.eth.block_number
             age     = current - created_block
             if age > config["max_token_age_blocks"]:
-                logger.info(f"❌ Token te oud: {age} blocks")
+                logger.info(f"[ERR] Token te oud: {age} blocks")
                 return False
 
         # Contract aanwezig check
@@ -325,7 +326,7 @@ async def is_safe_token(token: str, pool: str, created_block: int = 0) -> bool:
         if len(code) < 50:
             return False
         if len(code) < 500:
-            logger.info(f"⚠️ Verdacht kort contract: {len(code)} bytes")
+            logger.info(f"[WARN] Verdacht kort contract: {len(code)} bytes")
             return False
 
         # Liquiditeit + honeypot parallel uitvoeren
@@ -335,21 +336,21 @@ async def is_safe_token(token: str, pool: str, created_block: int = 0) -> bool:
         )
 
         if liq < config["min_liquidity_eth"]:
-            logger.info(f"❌ Liquiditeit te laag: {liq:.4f} ETH")
+            logger.info(f"[ERR] Liquiditeit te laag: {liq:.4f} ETH")
             return False
 
         if honeypot:
             return False
 
-        logger.info(f"✅ Safe: {token[:10]}... — {liq:.3f} ETH liquiditeit")
+        logger.info(f"[OK] Safe: {token[:10]}... - {liq:.3f} ETH liquiditeit")
         return True
 
     except Exception as e:
-        logger.warning(f"⚠️ Safety check fout: {e}")
+        logger.warning(f"[WARN] Safety check fout: {e}")
         return False
 
 # =============================================================
-#  KOPEN — zo min mogelijk latency
+#  KOPEN - zo min mogelijk latency
 # =============================================================
 async def buy_token(token: str, pool: str, created_block: int = 0) -> bool:
     if token in positions or token in blacklist:
@@ -378,13 +379,13 @@ async def buy_token(token: str, pool: str, created_block: int = 0) -> bool:
             args=[amount_out_min, route, signer.address, deadline]
         )
 
-        # Stuur transactie — zo snel mogelijk
+        # Stuur transactie - zo snel mogelijk
         tx_hash = await send_tx_async({
             "to":    AERODROME_ROUTER,
             "value": amount_wei,
             "data":  call_data,
         })
-        logger.info(f"📤 Koop verstuurd: {tx_hash[:16]}...")
+        logger.info(f"[TX] Koop verstuurd: {tx_hash[:16]}...")
 
         # Wacht op bevestiging asynchroon
         receipt = await rpc_retry(aw3.eth.wait_for_transaction_receipt, tx_hash, timeout=config["buy_timeout"])
@@ -413,12 +414,12 @@ async def buy_token(token: str, pool: str, created_block: int = 0) -> bool:
         return True
 
     except Exception as e:
-        logger.error(f"❌ Koop mislukt {token[:10]}: {e}")
+        logger.error(f"[ERR] Koop mislukt {token[:10]}: {e}")
         blacklist.add(token)
         return False
 
 # =============================================================
-#  VERKOPEN — async
+#  VERKOPEN - async
 # =============================================================
 async def sell_token(token: str, reden: str):
     if token not in positions:
@@ -471,6 +472,4 @@ async def sell_token(token: str, reden: str):
         del positions[token]
 
         await notify(
-            f"{emoji} *POSITIE GESLOTEN — {reden}*\n\n"
-            f"Token: `{token}`\n"
-            f"PnL: `{pnl_pct:+.1f}%` (`{pnl_et
+            f"{emoji} *POSITIE GESLOTEN - {reden}*\n\n
