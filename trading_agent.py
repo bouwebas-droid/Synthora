@@ -79,7 +79,9 @@ def send_transaction(tx: dict) -> str:
     tx["maxFeePerGas"]         = base_fee * 2 + priority
 
     signed = signer.sign_transaction(tx)
-    tx_hash = w3.eth.send_raw_transaction(signed.rawTransaction)
+    # web3.py v6+: raw_transaction (v5 gebruikte rawTransaction)
+    raw = getattr(signed, "raw_transaction", None) or getattr(signed, "rawTransaction", None)
+    tx_hash = w3.eth.send_raw_transaction(raw)
     return tx_hash.hex()
 
 # --- 5. TELEGRAM COMMANDS ---
@@ -197,4 +199,3 @@ async def health():
 
 if __name__ == "__main__":
     uvicorn.run(app, host="0.0.0.0", port=int(os.environ.get("PORT", 10000)))
-    
