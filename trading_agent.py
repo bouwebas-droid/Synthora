@@ -13,7 +13,7 @@ logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s
 logger = logging.getLogger("Synthora")
 app = FastAPI()
 
-# --- 2. CONFIGURATIE (Base Mainnet) ---
+# --- 2. CONFIGURATIE ---
 BASE_RPC_URL = "https://mainnet.base.org"
 w3 = Web3(Web3.HTTPProvider(BASE_RPC_URL))
 
@@ -26,7 +26,7 @@ AERODROME_ROUTER = "0xcF77a3Ba9A5CA399B7c97c74d54e5b1Beb874E43"
 WETH = "0x4200000000000000000000000000000000000006"
 CHAIN_ID = 8453
 
-# --- 3. ARCHITECT ENGINE ---
+# --- 3. ARCHITECT CORE LOGICA ---
 
 def calculate_user_op_hash(user_op):
     """Berekent de UserOp hash handmatig volgens de ERC-4337 standaard."""
@@ -57,17 +57,14 @@ async def get_smart_vault_address():
 async def send_user_operation(call_data, to_address, value=0):
     vault_address = await get_smart_vault_address()
     
-    # InitCode Logic
     init_code = "0x"
     if w3.eth.get_code(vault_address) == b'':
         factory_contract = w3.eth.contract(address=SIMPLE_ACCOUNT_FACTORY, abi=[{"inputs":[{"name":"owner","type":"address"},{"name":"salt","type":"uint256"}],"name":"createAccount","outputs":[{"name":"","type":"address"}],"stateMutability":"nonpayable","type":"function"}])
         init_code = SIMPLE_ACCOUNT_FACTORY + factory_contract.encode_abi("createAccount", args=[architect_signer.address, 0])[2:]
 
-    # Nonce Logic
     ep_contract = w3.eth.contract(address=ENTRY_POINT_ADDRESS, abi=[{"inputs":[{"name":"sender","type":"address"},{"name":"key","type":"uint192"}],"name":"getNonce","outputs":[{"name":"nonce","type":"uint256"}],"stateMutability":"view","type":"function"}])
     nonce = ep_contract.functions.getNonce(vault_address, 0).call()
     
-    # Execute Logic
     vault_contract = w3.eth.contract(address=vault_address, abi=[{"inputs":[{"name":"dest","type":"address"},{"name":"value","type":"uint256"},{"name":"func","type":"bytes"}],"name":"execute","outputs":[],"stateMutability":"nonpayable","type":"function"}])
     execute_data = vault_contract.encode_abi("execute", args=[to_address, value, call_data])
 
@@ -86,7 +83,7 @@ async def send_user_operation(call_data, to_address, value=0):
         # --- EERSTE HANDTEKENING (Simulatie) ---
         op_hash = calculate_user_op_hash(user_op)
         sig = architect_signer.sign_message(encode_defunct(primitive=op_hash))
-        user_op["signature"] = f"0x{sig.signature.hex()}" # FIX: Forceer 0x
+        user_op["signature"] = f"0x{sig.signature.hex()}"
 
         # Stap 2: Sponsoring
         res = await client.post(BUNDLER_URL, json={"jsonrpc":"2.0","id":1,"method":"pm_sponsorUserOperation","params":[user_op, ENTRY_POINT_ADDRESS]})
@@ -99,13 +96,13 @@ async def send_user_operation(call_data, to_address, value=0):
         # --- TWEEDE HANDTEKENING (Definitief) ---
         final_hash = calculate_user_op_hash(user_op)
         final_sig = architect_signer.sign_message(encode_defunct(primitive=final_hash))
-        user_op["signature"] = f"0x{final_sig.signature.hex()}" # FIX: Forceer 0x
+        user_op["signature"] = f"0x{final_sig.signature.hex()}"
 
         # Stap 3: Verzenden
         final_res = await client.post(BUNDLER_URL, json={"jsonrpc":"2.0","id":1,"method":"eth_sendUserOperation","params":[user_op, ENTRY_POINT_ADDRESS]})
         return final_res.json().get("result") or str(final_res.json().get("error"))
 
-# --- 4. TELEGRAM INTERFACE ---
+# --- 4. COMMAND CENTER ---
 
 OWNER_ID = int(os.environ.get("OWNER_ID", 0))
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
@@ -115,25 +112,47 @@ async def skyline_report(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id != OWNER_ID: return
     v = await get_smart_vault_address()
     b = w3.from_wei(w3.eth.get_balance(v), 'ether')
-    await update.message.reply_text(f"🏙️ **Synthora Skyline**\nVault: `{v}`\nSaldo: `{b:.6f} ETH`", parse_mode='Markdown')
+    await update.message.reply_text(f"🏙️ **Synthora Skyline Audit**\nVault: `{v}`\nSaldo: `{b:.6f} ETH`", parse_mode='Markdown')
 
 async def trade_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id != OWNER_ID: return
     if len(context.args) < 2: return
-    msg = await update.message.reply_text("🏗️ **Synthetiseren...**")
+    msg = await update.message.reply_text("🏗️ **Synthetiseren van operatie...**")
     try:
         token = w3.to_checksum_address(context.args[0])
         amount = float(context.args[1].replace(',', '.'))
-        router_abi = [{"inputs":[{"name":"amountOutMin","uint256":"uint256"},{"name":"routes","type":"tuple[]","components":[{"name":"from","type":"address"},{"name":"to","type":"address"},{"name":"stable","type":"bool"},{"name":"factory","type":"address"}]},{"name":"to","type":"address"},{"name":"deadline","type":"uint256"}],"name":"swapExactETHForTokens","outputs":[{"name":"amounts","type":"uint256[]"}],"stateMutability":"payable","type":"function"}]
+        
+        # GEFIXTE ABI VOOR AERODROME
+        router_abi = [{
+            "inputs": [
+                {"name": "amountOutMin", "type": "uint256"},
+                {"name": "routes", "type": "tuple[]", "components": [
+                    {"name": "from", "type": "address"},
+                    {"name": "to", "type": "address"},
+                    {"name": "stable", "type": "bool"},
+                    {"name": "factory", "type": "address"}
+                ]},
+                {"name": "to", "type": "address"},
+                {"name": "deadline", "type": "uint256"}
+            ],
+            "name": "swapExactETHForTokens",
+            "outputs": [{"name": "amounts", "type": "uint256[]"}],
+            "stateMutability": "payable",
+            "type": "function"
+        }]
+        
         router = w3.eth.contract(address=AERODROME_ROUTER, abi=router_abi)
         route = [{"from": WETH, "to": token, "stable": False, "factory": "0x4200000000000000000000000000000000000001"}]
+        
         call_data = router.encode_abi("swapExactETHForTokens", args=[0, route, await get_smart_vault_address(), int(time.time()) + 600])
+        
         op_hash = await send_user_operation(call_data, AERODROME_ROUTER, value=w3.to_wei(amount, 'ether'))
-        await msg.edit_text(f"🚀 **Verzonden naar Base!**\nHash: `{op_hash}`")
+        await msg.edit_text(f"🚀 **Operatie verzonden naar Base!**\nHash: `{op_hash}`")
     except Exception as e:
-        await msg.edit_text(f"⚠️ **Error:** `{e}`")
+        logger.error(f"Trade Error: {e}")
+        await msg.edit_text(f"⚠️ **Architect Error:** `{str(e)}`")
 
-# --- 5. RUN ---
+# --- 5. RUNNER ---
 async def run_bot():
     await asyncio.sleep(5)
     app_tg = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
@@ -150,4 +169,4 @@ async def startup(): asyncio.create_task(run_bot())
 
 if __name__ == "__main__":
     uvicorn.run(app, host="0.0.0.0", port=int(os.environ.get("PORT", 10000)))
-    
+        
