@@ -27,36 +27,38 @@ AERODROME_ROUTER = "0xcF77a3Ba9A5CA399B7c97c74d54e5b1Beb874E43"
 WETH = "0x4200000000000000000000000000000000000006"
 CHAIN_ID = 8453
 
-# --- 3. CRYPTOGRAFISCHE PRECISIE ENGINE ---
+# --- 3. DE CRYPTO-MACHINEKAMER ---
 
 def get_user_op_hash(user_op):
-    """Berekent de finale EIP-4337 hash voor Base Mainnet."""
-    
-    # Pack de UserOp data (EntryPoint v0.6 stijl)
+    """Berekent de UserOp hash exact volgens EntryPoint v0.6 regels."""
+    # Stap 1: Hash de bytes velden individueel
+    init_hash = keccak(to_bytes(hexstr=user_op['initCode']))
+    call_hash = keccak(to_bytes(hexstr=user_op['callData']))
+    pm_hash = keccak(to_bytes(hexstr=user_op['paymasterAndData']))
+
+    # Stap 2: Pack de hoofd-structuur
     user_op_encoded = encode(
         ['address', 'uint256', 'bytes32', 'bytes32', 'uint256', 'uint256', 'uint256', 'uint256', 'uint256', 'bytes32'],
         [
             w3.to_checksum_address(user_op['sender']),
             int(user_op['nonce'], 16),
-            keccak(to_bytes(hexstr=user_op['initCode'])),
-            keccak(to_bytes(hexstr=user_op['callData'])),
+            init_hash,
+            call_hash,
             int(user_op['callGasLimit'], 16),
             int(user_op['verificationGasLimit'], 16),
             int(user_op['preVerificationGas'], 16),
             int(user_op['maxFeePerGas'], 16),
             int(user_op['maxPriorityFeePerGas'], 16),
-            keccak(to_bytes(hexstr=user_op['paymasterAndData']))
+            pm_hash
         ]
     )
     
-    hashed_user_op = keccak(user_op_encoded)
-    
-    # Combineer met EntryPoint en ChainID
+    # Stap 3: Domein-specifieke hash (EntryPoint + ChainID)
+    hashed_op = keccak(user_op_encoded)
     final_encoded = encode(
         ['bytes32', 'address', 'uint256'],
-        [hashed_user_op, w3.to_checksum_address(ENTRY_POINT_ADDRESS), CHAIN_ID]
+        [hashed_op, w3.to_checksum_address(ENTRY_POINT_ADDRESS), CHAIN_ID]
     )
-    
     return keccak(final_encoded)
 
 async def get_smart_vault_address():
@@ -67,19 +69,22 @@ async def get_smart_vault_address():
 async def send_user_operation(call_data, to_address, value=0):
     vault_address = await get_smart_vault_address()
     
+    # InitCode
     init_code = "0x"
     if w3.eth.get_code(vault_address) == b'':
         factory_contract = w3.eth.contract(address=SIMPLE_ACCOUNT_FACTORY, abi=[{"inputs":[{"name":"owner","type":"address"},{"name":"salt","type":"uint256"}],"name":"createAccount","outputs":[{"name":"","type":"address"}],"stateMutability":"nonpayable","type":"function"}])
         init_code = SIMPLE_ACCOUNT_FACTORY + factory_contract.encode_abi("createAccount", args=[architect_signer.address, 0])[2:]
 
+    # Nonce
     ep_contract = w3.eth.contract(address=ENTRY_POINT_ADDRESS, abi=[{"inputs":[{"name":"sender","type":"address"},{"name":"key","type":"uint192"}],"name":"getNonce","outputs":[{"name":"nonce","type":"uint256"}],"stateMutability":"view","type":"function"}])
     nonce = ep_contract.functions.getNonce(vault_address, 0).call()
     
+    # Execute
     vault_contract = w3.eth.contract(address=vault_address, abi=[{"inputs":[{"name":"dest","type":"address"},{"name":"value","type":"uint256"},{"name":"func","type":"bytes"}],"name":"execute","outputs":[],"stateMutability":"nonpayable","type":"function"}])
     execute_data = vault_contract.encode_abi("execute", args=[to_address, value, call_data])
 
-    async with httpx.AsyncClient(timeout=45.0) as client:
-        # Haal Gas Prijzen
+    async with httpx.AsyncClient(timeout=60.0) as client:
+        # Gas Prijzen
         gas_res = await client.post(BUNDLER_URL, json={"jsonrpc":"2.0","id":1,"method":"pimlico_getUserOperationGasPrice","params":[]})
         gp = gas_res.json()["result"]["standard"]
 
@@ -90,13 +95,13 @@ async def send_user_operation(call_data, to_address, value=0):
             "paymasterAndData": "0x", "signature": "0x"
         }
 
-        # --- STAP 1: HANDTEKENING VOOR SIMULATIE ---
-        # We tekenen een versie die door de kluis als 'valide' wordt gezien
+        # --- EERSTE HANDTEKENING (Voor Simulatie) ---
         op_hash = get_user_op_hash(user_op)
+        # We gebruiken sign_message met encode_defunct voor de Ethereum prefix
         sig = architect_signer.sign_message(encode_defunct(primitive=op_hash))
         user_op["signature"] = f"0x{sig.signature.hex()}"
 
-        # Stap 2: Sponsoring
+        # Sponsoring
         res = await client.post(BUNDLER_URL, json={"jsonrpc":"2.0","id":1,"method":"pm_sponsorUserOperation","params":[user_op, ENTRY_POINT_ADDRESS]})
         sponsor_data = res.json()
         if "error" in sponsor_data:
@@ -104,12 +109,12 @@ async def send_user_operation(call_data, to_address, value=0):
         
         user_op.update(sponsor_data["result"])
 
-        # --- STAP 2: DEFINITIEVE HANDTEKENING ---
+        # --- TWEEDE HANDTEKENING (Definitief) ---
         final_hash = get_user_op_hash(user_op)
         final_sig = architect_signer.sign_message(encode_defunct(primitive=final_hash))
         user_op["signature"] = f"0x{final_sig.signature.hex()}"
 
-        # Stap 3: Verzenden
+        # Verzenden
         final_res = await client.post(BUNDLER_URL, json={"jsonrpc":"2.0","id":1,"method":"eth_sendUserOperation","params":[user_op, ENTRY_POINT_ADDRESS]})
         return final_res.json().get("result") or str(final_res.json().get("error"))
 
@@ -123,7 +128,7 @@ async def skyline_report(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id != OWNER_ID: return
     v = await get_smart_vault_address()
     b = w3.from_wei(w3.eth.get_balance(v), 'ether')
-    await update.message.reply_text(f"🏙️ **Synthora Skyline Audit**\n\nVault: `{v}`\nSaldo: `{b:.6f} ETH`", parse_mode='Markdown')
+    await update.message.reply_text(f"🏙️ **Synthora Skyline Audit**\nVault: `{v}`\nSaldo: `{b:.6f} ETH`", parse_mode='Markdown')
 
 async def trade_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id != OWNER_ID: return
@@ -139,12 +144,12 @@ async def trade_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
         call_data = router.encode_abi("swapExactETHForTokens", args=[0, route, await get_smart_vault_address(), int(time.time()) + 600])
         op_hash = await send_user_operation(call_data, AERODROME_ROUTER, value=w3.to_wei(amount, 'ether'))
-        await msg.edit_text(f"🚀 **Verzonden naar Base!**\n\nHash: `{op_hash}`")
+        await msg.edit_text(f"🚀 **Verzonden!**\nHash: `{op_hash}`")
     except Exception as e:
         logger.error(f"Trade Error: {e}")
-        await msg.edit_text(f"⚠️ **Architect Error:**\n`{str(e)}`")
+        await msg.edit_text(f"⚠️ **Architect Error:** `{str(e)}`")
 
-# --- 5. RUNNER ---
+# --- 5. RUN ---
 async def run_bot():
     await asyncio.sleep(5)
     app_tg = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
@@ -157,8 +162,9 @@ async def run_bot():
     while True: await asyncio.sleep(3600)
 
 @app.on_event("startup")
-async def startup(): asyncio.create_task(run_bot())
+async def startup():
+    asyncio.create_task(run_bot())
 
 if __name__ == "__main__":
     uvicorn.run(app, host="0.0.0.0", port=int(os.environ.get("PORT", 10000)))
-        
+    
