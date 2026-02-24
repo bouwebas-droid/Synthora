@@ -9,11 +9,16 @@ from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes
 from fastapi import FastAPI
 import uvicorn
 
-logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
+# Logging: De Architect houdt toezicht op elke byte
+logging.basicConfig(
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    level=logging.INFO
+)
 logger = logging.getLogger("Synthora")
+
 app = FastAPI()
 
-# --- 2. CONFIGURATIE ---
+# --- 2. CONFIGURATIE (Base Mainnet) ---
 BASE_RPC_URL = "https://mainnet.base.org"
 w3 = Web3(Web3.HTTPProvider(BASE_RPC_URL))
 
@@ -30,13 +35,16 @@ ENTRY_POINT_ABI = [
     {"inputs":[{"name":"userOp","type":"tuple","components":[{"name":"sender","type":"address"},{"name":"nonce","type":"uint256"},{"name":"initCode","type":"bytes"},{"name":"callData","type":"bytes"},{"name":"callGasLimit","type":"uint256"},{"name":"verificationGasLimit","type":"uint256"},{"name":"preVerificationGas","type":"uint256"},{"name":"maxFeePerGas","type":"uint256"},{"name":"maxPriorityFeePerGas","type":"uint256"},{"name":"paymasterAndData","type":"bytes"},{"name":"signature","type":"bytes"}]}],"name":"getUserOpHash","outputs":[{"name":"","type":"bytes32"}],"stateMutability":"view","type":"function"}
 ]
 
+# Credentials & Toegangscontrole
 OWNER_ID = int(os.environ.get("OWNER_ID", 0))
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
-architect_signer = Account.from_key(os.environ.get("ARCHITECT_SESSION_KEY")) if os.environ.get("ARCHITECT_SESSION_KEY") else None
+private_key = os.environ.get("ARCHITECT_SESSION_KEY")
+architect_signer = Account.from_key(private_key) if private_key else None
 
-# --- 3. LOGICA ---
+# --- 3. CRYPTOGRAFIE & SMART ACCOUNT LOGICA ---
 
 async def get_smart_vault_address():
+    """Berekent het vault-adres op basis van de Bot Signer (Eigenaar)."""
     factory_abi = [{"inputs":[{"name":"owner","type":"address"},{"name":"salt","type":"uint256"}],"name":"getAddress","outputs":[{"name":"","type":"address"}],"stateMutability":"view","type":"function"}]
     factory = w3.eth.contract(address=SIMPLE_ACCOUNT_FACTORY, abi=factory_abi)
     return factory.functions.getAddress(architect_signer.address, 0).call()
@@ -45,6 +53,7 @@ async def send_user_operation(call_data, to_address, value=0):
     vault_address = await get_smart_vault_address()
     ep_contract = w3.eth.contract(address=ENTRY_POINT_ADDRESS, abi=ENTRY_POINT_ABI)
     
+    # InitCode: Alleen voor de allereerste transactie van de Vault
     init_code = "0x"
     if w3.eth.get_code(vault_address) == b'':
         factory_contract = w3.eth.contract(address=SIMPLE_ACCOUNT_FACTORY, abi=[{"inputs":[{"name":"owner","type":"address"},{"name":"salt","type":"uint256"}],"name":"createAccount","outputs":[{"name":"","type":"address"}],"stateMutability":"nonpayable","type":"function"}])
@@ -56,31 +65,40 @@ async def send_user_operation(call_data, to_address, value=0):
     vault_contract = w3.eth.contract(address=vault_address, abi=acc_abi)
     execute_data = vault_contract.encode_abi("execute", args=[to_address, value, call_data])
 
-    # De "Dummy" Signature voor simulatie
-    DUMMY_SIGNATURE = "0x" + "00" * 64 + "1b"
-
     async with httpx.AsyncClient(timeout=30.0) as client:
-        # STAP 1: Haal actuele gas-prijzen op van de Bundler
+        # 1. Gas prijzen ophalen
         gas_price_res = await client.post(BUNDLER_URL, json={
             "jsonrpc": "2.0", "id": 1, "method": "pimlico_getUserOperationGasPrice", "params": []
         })
         gp = gas_price_res.json()["result"]["standard"]
 
+        # 2. Voorlopige UserOp bouwen voor simulatie
         user_op = {
             "sender": vault_address,
             "nonce": to_hex(nonce),
             "initCode": init_code,
             "callData": execute_data,
-            "callGasLimit": to_hex(1000000), # Pimlico zal dit overschrijven
+            "callGasLimit": to_hex(2000000), 
             "verificationGasLimit": to_hex(1000000),
             "preVerificationGas": to_hex(100000),
             "maxFeePerGas": gp["maxFeePerGas"],
             "maxPriorityFeePerGas": gp["maxPriorityFeePerGas"],
             "paymasterAndData": "0x",
-            "signature": DUMMY_SIGNATURE
+            "signature": "0x" 
         }
 
-        # STAP 2: Sponsoring & Schatting
+        # --- DOUBLE-SIGN STRATEGIE: Stap 1 (Simulatie Handtekening) ---
+        dummy_tuple = (
+            user_op['sender'], int(user_op['nonce'], 16), user_op['initCode'],
+            user_op['callData'], int(user_op['callGasLimit'], 16),
+            int(user_op['verificationGasLimit'], 16), int(user_op['preVerificationGas'], 16),
+            int(user_op['maxFeePerGas'], 16), int(user_op['maxPriorityFeePerGas'], 16),
+            user_op['paymasterAndData'], b''
+        )
+        dummy_hash = ep_contract.functions.getUserOpHash(dummy_tuple).call()
+        user_op["signature"] = architect_signer.sign_message(encode_defunct(primitive=dummy_hash)).signature.hex()
+
+        # 3. Sponsoring aanvragen
         res = await client.post(BUNDLER_URL, json={
             "jsonrpc": "2.0", "id": 1, "method": "pm_sponsorUserOperation", 
             "params": [user_op, ENTRY_POINT_ADDRESS]
@@ -88,41 +106,48 @@ async def send_user_operation(call_data, to_address, value=0):
         
         sponsor_data = res.json()
         if "error" in sponsor_data:
-            # Als dit faalt, probeer de error te printen om te zien of het gas-gerelateerd is
-            raise Exception(f"Sponsor Fout: {sponsor_data['error'].get('message')}")
+            raise Exception(f"Sponsor Error: {sponsor_data['error'].get('message')}")
         
         user_op.update(sponsor_data["result"])
 
-        # STAP 3: Échte handtekening zetten
-        user_op_tuple = (
+        # --- DOUBLE-SIGN STRATEGIE: Stap 2 (Definitieve Handtekening) ---
+        final_tuple = (
             user_op['sender'], int(user_op['nonce'], 16), user_op['initCode'],
             user_op['callData'], int(user_op['callGasLimit'], 16),
             int(user_op['verificationGasLimit'], 16), int(user_op['preVerificationGas'], 16),
             int(user_op['maxFeePerGas'], 16), int(user_op['maxPriorityFeePerGas'], 16),
             user_op['paymasterAndData'], b''
         )
-        
-        op_hash = ep_contract.functions.getUserOpHash(user_op_tuple).call()
-        signature = architect_signer.sign_message(encode_defunct(primitive=op_hash))
-        user_op["signature"] = signature.signature.hex()
+        final_hash = ep_contract.functions.getUserOpHash(final_tuple).call()
+        user_op["signature"] = architect_signer.sign_message(encode_defunct(primitive=final_hash)).signature.hex()
 
-        # STAP 4: Verzenden
+        # 4. Verzenden
         final_res = await client.post(BUNDLER_URL, json={
             "jsonrpc": "2.0", "id": 1, "method": "eth_sendUserOperation", 
             "params": [user_op, ENTRY_POINT_ADDRESS]
         })
         return final_res.json().get("result") or str(final_res.json().get("error"))
 
-# --- 4. HANDLERS ---
+# --- 4. COMMAND CENTER ---
 
 async def skyline_report(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id != OWNER_ID: return
     try:
         v = await get_smart_vault_address()
         b = w3.from_wei(w3.eth.get_balance(v), 'ether')
-        await update.message.reply_text(f"🏙️ **Skyline**\n\nVault: `{v}`\nSaldo: `{b:.6f} ETH`", parse_mode='Markdown')
+        s = architect_signer.address
+        report = (
+            "🏙️ **Synthora Architecture Audit**\n"
+            "-------------------------------------\n"
+            f"🔐 **Vault:** `{v}`\n"
+            f"💰 **Saldo:** `{b:.6f} ETH`\n"
+            f"🤖 **Signer:** `{s}`\n"
+            "-------------------------------------\n"
+            "✅ *Systeem is gesynchroniseerd.*"
+        )
+        await update.message.reply_text(report, parse_mode='Markdown')
     except Exception as e:
-        await update.message.reply_text(f"⚠️ Fout: {e}")
+        await update.message.reply_text(f"⚠️ Fout: `{e}`")
 
 async def trade_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id != OWNER_ID: return
@@ -130,7 +155,7 @@ async def trade_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("❌ `/trade [token] [eth]`")
         return
     
-    msg = await update.message.reply_text("🏗️ **Synthetiseren...**")
+    status = await update.message.reply_text("🏗️ **Synthetiseren van operatie...**")
     try:
         token = w3.to_checksum_address(context.args[0])
         amount = float(context.args[1].replace(',', '.'))
@@ -140,25 +165,38 @@ async def trade_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         route = [{"from": WETH, "to": token, "stable": False, "factory": "0x4200000000000000000000000000000000000001"}]
         
         call_data = router.encode_abi("swapExactETHForTokens", args=[0, route, await get_smart_vault_address(), int(time.time()) + 600])
+        
         op_hash = await send_user_operation(call_data, AERODROME_ROUTER, value=w3.to_wei(amount, 'ether'))
-        await msg.edit_text(f"🚀 **Verzonden!**\nHash: `{op_hash}`", parse_mode='Markdown')
+        await status.edit_text(f"🚀 **Operatie live op Base!**\n\nHash: `{op_hash}`")
     except Exception as e:
-        await msg.edit_text(f"⚠️ **Error:** `{e}`")
+        logger.error(f"Trade Error: {e}")
+        await status.edit_text(f"⚠️ **Architect Error:**\n`{str(e)}`")
 
-# --- 5. RUN ---
+# --- 5. RUNNER ---
+
 async def run_bot():
-    await asyncio.sleep(5)
+    await asyncio.sleep(5) # Voorkomt conflict op Render
     app_tg = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
     app_tg.add_handler(CommandHandler("trade", trade_command))
     app_tg.add_handler(CommandHandler("skyline", skyline_report))
+    
     await app_tg.initialize()
     await app_tg.start()
-    await app_tg.updater.start_polling()
-    while True: await asyncio.sleep(3600)
+    await app_tg.updater.start_polling(poll_interval=2.0)
+    logger.info("🚀 Synthora Engine Online.")
+    
+    while True:
+        await asyncio.sleep(3600)
 
 @app.on_event("startup")
-async def startup(): asyncio.create_task(run_bot())
+async def startup():
+    asyncio.create_task(run_bot())
+
+@app.get("/")
+async def health():
+    return {"status": "Synthora Architect Engine Active"}
 
 if __name__ == "__main__":
-    uvicorn.run(app, host="0.0.0.0", port=int(os.environ.get("PORT", 10000)))
-    
+    port = int(os.environ.get("PORT", 10000))
+    uvicorn.run(app, host="0.0.0.0", port=port)
+        
