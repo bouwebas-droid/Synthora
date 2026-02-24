@@ -1,5 +1,7 @@
 # =============================================================
 #  SYNTHORA SNIPER — Base Mainnet | Aerodrome | Direct Wallet
+#  MODUS: NONSTOP JAGEN — snelste scanner, parallelle monitoring,
+#         auto-reinvest, statistieken
 # =============================================================
 import logging, os, asyncio, time
 from web3 import Web3
@@ -17,7 +19,19 @@ app    = FastAPI()
 #  CONFIGURATIE
 # =============================================================
 BASE_RPC_URL      = "https://mainnet.base.org"
+BASE_CHAIN_ID     = 8453
 w3                = Web3(Web3.HTTPProvider(BASE_RPC_URL))
+
+# ⛔ Harde chain check — weigert te starten op verkeerde chain
+_chain = w3.eth.chain_id
+if _chain != BASE_CHAIN_ID:
+    raise SystemExit(
+        f"⛔ VERKEERDE CHAIN GEDETECTEERD!\n"
+        f"Verwacht: Base Mainnet (chain_id={BASE_CHAIN_ID})\n"
+        f"Verbonden met: chain_id={_chain}\n"
+        f"Script gestopt om verlies te voorkomen."
+    )
+logger.info(f"✅ Base Mainnet bevestigd (chain_id={BASE_CHAIN_ID})")
 
 AERODROME_ROUTER  = "0xcF77a3Ba9A5CA399B7c97c74d54e5b1Beb874E43"
 AERODROME_FACTORY = "0x420DD381b31aEf6683db6B902084cB0FFECe40Da"
@@ -28,18 +42,27 @@ config = {
     "active":              False,  # sniper aan/uit
     "snipe_eth":           0.01,   # ETH per snipe
     "take_profit_pct":     50,     # verkoop bij +50%
-    "trailing_stop_pct":   15,     # verkoop als prijs X% daalt vanaf de PIEK (volgt winst omhoog)
-    "hard_stop_pct":       25,     # absolute bodem — verkoop altijd als verlies groter dan dit is
-    "min_profit_to_trail": 10,     # trailing stop activeert pas als we >= 10% winst hebben
+    "trailing_stop_pct":   15,     # verkoop als prijs X% daalt vanaf de PIEK
+    "hard_stop_pct":       25,     # absolute bodem — verkoop altijd als verlies groter dan dit
+    "min_profit_to_trail": 10,     # trailing stop activeert pas bij >= 10% winst
     "slippage_bps":        300,    # 3% slippage
     "min_liquidity_eth":   1.0,    # negeer pools met minder dan 1 ETH
     "max_positions":       5,      # max gelijktijdige posities
+    "reinvest":            True,   # winst automatisch herinvesteren in snipe_eth
+    "reinvest_pct":        50,     # % van winst die terug gaat in snipe bedrag
+    "gas_boost":           True,   # agressievere gas tips voor snellere inclusie
 }
-# Logica:
-# - Onder min_profit_to_trail: alleen hard_stop actief (ruimte om te ademen)
-# - Boven min_profit_to_trail: trailing stop volgt de piek mee omhoog
-# - Voorbeeld: koop @ 1 ETH, stijgt naar 1.6 ETH (piek), daalt naar 1.36 ETH → verkoop (15% van piek)
-# - Hard stop: als het echt crasht zonder ooit winst te maken → exit
+
+# Sessie statistieken
+stats = {
+    "trades":     0,
+    "wins":       0,
+    "losses":     0,
+    "total_pnl":  0.0,   # ETH
+    "best_trade": 0.0,
+    "worst_trade": 0.0,
+    "started":    time.time(),
+}
 
 # Actieve posities:
 # { token: { entry_eth_per_token, token_amount, buy_tx, timestamp, peak_eth } }
@@ -127,13 +150,17 @@ tg_bot         = None
 #  TRANSACTIE ENGINE
 # =============================================================
 def send_tx(tx: dict) -> str:
+    # Dubbele check — elke transactie wordt geweigerd als chain niet Base is
+    if w3.eth.chain_id != BASE_CHAIN_ID:
+        raise Exception(f"⛔ Chain mismatch in send_tx! Verwacht {BASE_CHAIN_ID}, kreeg {w3.eth.chain_id}")
     tx["nonce"]   = w3.eth.get_transaction_count(signer.address, "pending")
-    tx["chainId"] = 8453
+    tx["chainId"] = BASE_CHAIN_ID
     tx["from"]    = signer.address
     if "gas" not in tx:
-        tx["gas"] = int(w3.eth.estimate_gas(tx) * 1.2)
+        tx["gas"] = int(w3.eth.estimate_gas(tx) * 1.3)  # 30% buffer voor zekerheid
     base_fee = w3.eth.get_block("latest")["baseFeePerGas"]
-    priority = w3.to_wei(0.01, "gwei")
+    # Gas boost: hogere tip = snellere inclusie = eerder in de block dan concurrenten
+    priority = w3.to_wei(0.05, "gwei") if config.get("gas_boost") else w3.to_wei(0.01, "gwei")
     tx["maxPriorityFeePerGas"] = priority
     tx["maxFeePerGas"]         = base_fee * 2 + priority
     signed  = signer.sign_transaction(tx)
@@ -271,15 +298,33 @@ async def sell_token(token: str, reden: str):
 
         received_eth = w3.from_wei(expected_eth, "ether")
         invested_eth = config["snipe_eth"]
-        pnl_pct      = ((received_eth - invested_eth) / invested_eth) * 100
+        pnl_eth      = received_eth - invested_eth
+        pnl_pct      = (pnl_eth / invested_eth) * 100
         emoji        = "🟢" if pnl_pct >= 0 else "🔴"
+
+        # Statistieken bijwerken
+        stats["trades"]    += 1
+        stats["total_pnl"] += pnl_eth
+        if pnl_pct >= 0:
+            stats["wins"] += 1
+            stats["best_trade"] = max(stats["best_trade"], pnl_pct)
+        else:
+            stats["losses"] += 1
+            stats["worst_trade"] = min(stats["worst_trade"], pnl_pct)
+
+        # Auto-reinvest: deel van de winst terug in snipe bedrag pompen
+        if config["reinvest"] and pnl_eth > 0:
+            reinvest_amount   = pnl_eth * (config["reinvest_pct"] / 100)
+            config["snipe_eth"] = round(config["snipe_eth"] + reinvest_amount, 6)
+            logger.info(f"♻️ Reinvest: +{reinvest_amount:.5f} ETH → snipe bedrag nu {config['snipe_eth']:.5f} ETH")
 
         await notify(
             f"{emoji} *Positie gesloten — {reden}*\n\n"
             f"Token: `{token}`\n"
-            f"Ingezet: `{invested_eth:.4f} ETH`\n"
-            f"Ontvangen: `{received_eth:.4f} ETH`\n"
-            f"PnL: `{pnl_pct:+.1f}%`\n"
+            f"Ingezet: `{invested_eth:.5f} ETH`\n"
+            f"Ontvangen: `{received_eth:.5f} ETH`\n"
+            f"PnL: `{pnl_pct:+.1f}%` (`{pnl_eth:+.5f} ETH`)\n"
+            f"Totaal PnL sessie: `{stats['total_pnl']:+.5f} ETH`\n"
             f"Tx: https://basescan.org/tx/{tx_hash}"
         )
         del positions[token]
@@ -289,50 +334,52 @@ async def sell_token(token: str, reden: str):
         await notify(f"⚠️ *Verkoop mislukt* `{token}`\n`{e}`")
 
 # =============================================================
-#  POSITIE MONITOR — take profit / stop loss loop
+#  POSITIE MONITOR — parallel, elke 2 seconden per token
 # =============================================================
+async def monitor_single(token: str, pos: dict):
+    """Monitort één positie asynchroon."""
+    router = w3.eth.contract(address=AERODROME_ROUTER, abi=ROUTER_ABI)
+    try:
+        route       = [{"from": token, "to": WETH, "stable": False, "factory": AERODROME_FACTORY}]
+        amounts_out = router.functions.getAmountsOut(pos["token_amount"], route).call()
+        current_eth = float(w3.from_wei(amounts_out[-1], "ether"))
+        invested    = config["snipe_eth"]
+        pnl_pct     = ((current_eth - invested) / invested) * 100
+
+        if current_eth > pos["peak_eth"]:
+            positions[token]["peak_eth"] = current_eth
+            logger.info(f"📈 Nieuwe piek {token[:10]}...: {current_eth:.5f} ETH ({pnl_pct:+.1f}%)")
+
+        peak_eth       = positions[token]["peak_eth"]
+        drop_from_peak = ((peak_eth - current_eth) / peak_eth) * 100
+        profit_at_peak = ((peak_eth - invested) / invested) * 100
+
+        logger.info(f"📊 {token[:10]}... PnL: {pnl_pct:+.1f}% | Piek: +{profit_at_peak:.1f}% | Daling: -{drop_from_peak:.1f}%")
+
+        if pnl_pct >= config["take_profit_pct"]:
+            await sell_token(token, f"Take Profit +{pnl_pct:.1f}%")
+        elif profit_at_peak >= config["min_profit_to_trail"] and drop_from_peak >= config["trailing_stop_pct"]:
+            await sell_token(token, f"Trailing Stop (piek +{profit_at_peak:.1f}%, nu {pnl_pct:+.1f}%)")
+        elif pnl_pct <= -config["hard_stop_pct"]:
+            await sell_token(token, f"Hard Stop {pnl_pct:.1f}%")
+
+    except Exception as e:
+        logger.warning(f"⚠️ Monitor fout {token}: {e}")
+
 async def monitor_positions():
+    """Start voor elke positie een parallelle check elke 2 seconden."""
     while True:
-        await asyncio.sleep(5)
+        await asyncio.sleep(2)  # sneller dan voorheen (was 5s)
         if not positions:
             continue
-        router = w3.eth.contract(address=AERODROME_ROUTER, abi=ROUTER_ABI)
-        for token, pos in list(positions.items()):
-            try:
-                route       = [{"from": token, "to": WETH, "stable": False, "factory": AERODROME_FACTORY}]
-                amounts_out = router.functions.getAmountsOut(pos["token_amount"], route).call()
-                current_eth = float(w3.from_wei(amounts_out[-1], "ether"))
-                invested    = config["snipe_eth"]
-                pnl_pct     = ((current_eth - invested) / invested) * 100
-
-                # Piek bijwerken als prijs hoger is dan ooit
-                if current_eth > pos["peak_eth"]:
-                    positions[token]["peak_eth"] = current_eth
-                    logger.info(f"📈 Nieuwe piek {token[:10]}...: {current_eth:.5f} ETH (+{pnl_pct:.1f}%)")
-
-                peak_eth        = positions[token]["peak_eth"]
-                drop_from_peak  = ((peak_eth - current_eth) / peak_eth) * 100
-                profit_at_peak  = ((peak_eth - invested) / invested) * 100
-
-                logger.info(f"📊 {token[:10]}... PnL: {pnl_pct:+.1f}% | Piek: +{profit_at_peak:.1f}% | Daling: -{drop_from_peak:.1f}%")
-
-                # Take profit: harde bovengrens
-                if pnl_pct >= config["take_profit_pct"]:
-                    await sell_token(token, f"Take Profit +{pnl_pct:.1f}%")
-
-                # Trailing stop: alleen actief als we al genoeg winst hebben gehad
-                elif profit_at_peak >= config["min_profit_to_trail"] and drop_from_peak >= config["trailing_stop_pct"]:
-                    await sell_token(token, f"Trailing Stop (piek +{profit_at_peak:.1f}%, nu {pnl_pct:+.1f}%)")
-
-                # Hard stop: absoluut verlies te groot — altijd verkopen
-                elif pnl_pct <= -config["hard_stop_pct"]:
-                    await sell_token(token, f"Hard Stop {pnl_pct:.1f}%")
-
-            except Exception as e:
-                logger.warning(f"⚠️ Monitor fout {token}: {e}")
+        # Alle posities tegelijk checken — geen wachtrij
+        await asyncio.gather(*[
+            monitor_single(token, pos)
+            for token, pos in list(positions.items())
+        ])
 
 # =============================================================
-#  POOL SCANNER — nieuwe Aerodrome pools block-by-block
+#  POOL SCANNER — elke 0.5s nieuwe blocks checken, parallel snipen
 # =============================================================
 async def scan_new_pools():
     factory    = w3.eth.contract(address=AERODROME_FACTORY, abi=FACTORY_ABI)
@@ -340,8 +387,9 @@ async def scan_new_pools():
     logger.info(f"🔍 Scanner actief vanaf block {last_block}")
 
     while True:
-        await asyncio.sleep(2)
+        await asyncio.sleep(0.5)  # zo snel mogelijk — Base produceert elke ~2s een block
         if not config["active"]:
+            await asyncio.sleep(1)
             continue
         try:
             current_block = w3.eth.block_number
@@ -352,6 +400,11 @@ async def scan_new_pools():
                 fromBlock=last_block + 1, toBlock=current_block
             )
 
+            if events:
+                logger.info(f"🆕 {len(events)} nieuwe pool(s) in block {current_block}")
+
+            # Alle nieuwe pools parallel verwerken
+            targets = []
             for event in events:
                 token0 = event["args"]["token0"]
                 token1 = event["args"]["token1"]
@@ -362,24 +415,30 @@ async def scan_new_pools():
                 elif token0.lower() == WETH.lower():
                     new_token = token1
                 else:
-                    continue  # geen WETH pair
+                    continue
 
                 if new_token in blacklist or new_token in positions:
                     continue
 
-                logger.info(f"🆕 Nieuwe pool: {new_token}")
-                await notify(f"🆕 *Nieuwe pool*\nToken: `{new_token}`\nPool: `{pool}`")
+                targets.append((new_token, pool))
 
-                if is_safe_token(new_token, pool):
-                    await buy_token(new_token)
+            # Veiligheidscheck + koop parallel voor alle targets
+            async def process(token, pool):
+                await notify(f"🆕 *Nieuwe pool*\nToken: `{token}`\nPool: `{pool}`")
+                if is_safe_token(token, pool):
+                    await buy_token(token)
                 else:
-                    blacklist.add(new_token)
+                    blacklist.add(token)
+                    logger.info(f"🚫 Geblacklist: {token}")
+
+            if targets:
+                await asyncio.gather(*[process(t, p) for t, p in targets])
 
             last_block = current_block
 
         except Exception as e:
             logger.error(f"❌ Scanner fout: {e}")
-            await asyncio.sleep(5)
+            await asyncio.sleep(2)
 
 # =============================================================
 #  TELEGRAM COMMANDO'S
@@ -396,53 +455,4 @@ async def cmd_stop(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id != OWNER_ID: return
-    balance = w3.from_wei(w3.eth.get_balance(signer.address), "ether")
-    status  = "🟢 ACTIEF" if config["active"] else "🔴 GESTOPT"
-    pos_txt = "\n".join([f"• `{t[:12]}...`" for t in positions]) or "Geen"
-    await update.message.reply_text(
-        f"📊 *Synthora Status*\n\n"
-        f"Status: {status}\n"
-        f"Wallet: `{signer.address}`\n"
-        f"Saldo: `{balance:.6f} ETH`\n"
-        f"Posities ({len(positions)}/{config['max_positions']}):\n{pos_txt}\n\n"
-        f"⚙️ *Instellingen*\n"
-        f"Snipe bedrag: `{config['snipe_eth']} ETH`\n"
-        f"Take Profit: `+{config['take_profit_pct']}%`\n"
-        f"Trailing Stop: `-{config['trailing_stop_pct']}% vanaf piek`\n"
-        f"Trailing activeert bij: `+{config['min_profit_to_trail']}% winst`\n"
-        f"Hard Stop: `-{config['hard_stop_pct']}%`\n"
-        f"Min. liquiditeit: `{config['min_liquidity_eth']} ETH`\n"
-        f"Slippage: `{config['slippage_bps']} bps`",
-        parse_mode="Markdown"
-    )
-
-async def cmd_set(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Gebruik: /set <instelling> <waarde>
-    eth | tp | sl | minliq | slippage | maxpos"""
-    if update.effective_user.id != OWNER_ID: return
-    if len(context.args) < 2:
-        await update.message.reply_text(
-            "Gebruik: `/set <instelling> <waarde>`\n\n"
-            "`eth` — ETH per snipe\n"
-            "`tp` — Take profit %\n"
-            "`trail` — Trailing stop % vanaf piek\n"
-            "`hardstop` — Hard stop % verlies (absolute bodem)\n"
-            "`mintrail` — Min winst% voor trailing stop activeert\n"
-            "`minliq` — Min liquiditeit ETH\n"
-            "`slippage` — Slippage basispunten\n"
-            "`maxpos` — Max posities",
-            parse_mode="Markdown"
-        )
-        return
-    mapping = {"eth":"snipe_eth","tp":"take_profit_pct","trail":"trailing_stop_pct",
-               "hardstop":"hard_stop_pct","mintrail":"min_profit_to_trail",
-               "minliq":"min_liquidity_eth","slippage":"slippage_bps","maxpos":"max_positions"}
-    key = context.args[0].lower()
-    if key not in mapping:
-        await update.message.reply_text("❌ Onbekende instelling.")
-        return
-    val = float(context.args[1])
-    config[mapping[key]] = val
-    await update.message.reply_text(f"✅ `{key}` → `{val}`", parse_mode="Markdown")
-
-async def cmd_buy(upda
+    balance = w3.from_wei(w3.eth
