@@ -9,7 +9,7 @@ from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes
 from fastapi import FastAPI
 import uvicorn
 
-# Logging instellen op DEBUG voor meer inzicht tijdens het fixen
+# Logging instellen
 logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     level=logging.INFO
@@ -23,6 +23,7 @@ BASE_RPC_URL = "https://mainnet.base.org"
 w3 = Web3(Web3.HTTPProvider(BASE_RPC_URL))
 
 PIMLICO_API_KEY = os.environ.get("PIMLICO_API_KEY", "")
+# Let op: we gebruiken de Base Mainnet Chain ID (8453)
 BUNDLER_URL = f"https://api.pimlico.io/v2/8453/rpc?apikey={PIMLICO_API_KEY}"
 
 ENTRY_POINT_ADDRESS = "0x5FF137D4b0FDCD49DcA30c7CF57E578a026d2789"
@@ -57,7 +58,6 @@ async def send_user_operation(call_data, to_address, value=0):
     vault_address = await get_smart_vault_address()
     ep_contract = w3.eth.contract(address=ENTRY_POINT_ADDRESS, abi=ENTRY_POINT_ABI)
     
-    # 1. InitCode (alleen indien nodig)
     init_code = "0x"
     if w3.eth.get_code(vault_address) == b'':
         factory_contract = w3.eth.contract(address=SIMPLE_ACCOUNT_FACTORY, abi=[{"inputs":[{"name":"owner","type":"address"},{"name":"salt","type":"uint256"}],"name":"createAccount","outputs":[{"name":"","type":"address"}],"stateMutability":"nonpayable","type":"function"}])
@@ -119,70 +119,77 @@ async def send_user_operation(call_data, to_address, value=0):
 # --- 4. COMMAND CENTER ---
 
 async def skyline_report(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    # CRUCIALE DEBUG REGEL: Log het ID van de persoon die praat
-    logger.info(f"Skyline aangeroepen door: {update.effective_user.id} (Verwacht: {OWNER_ID})")
-    
     if update.effective_user.id != OWNER_ID:
-        await update.message.reply_text("🚫 Toegang geweigerd. U bent niet de Architect.")
+        await update.message.reply_text("🚫 Toegang geweigerd.")
         return
-
     try:
         v = await get_smart_vault_address()
         b = w3.from_wei(w3.eth.get_balance(v), 'ether')
-        report = (
-            "🏙️ **Skyline Report - Architect Status**\n"
-            "-------------------------------------\n"
-            f"🔐 **Vault:** `{v}`\n"
-            f"💰 **Kapitaal:** `{b:.6f} ETH`\n"
-            f"📡 **Netwerk:** Base Mainnet\n"
-            "-------------------------------------\n"
-            "✅ *De Architect is operationeel.*"
-        )
+        report = f"🏙️ **Skyline Report**\n\n🔐 **Vault:** `{v}`\n💰 **Saldo:** `{b:.6f} ETH`"
         await update.message.reply_text(report, parse_mode='Markdown')
     except Exception as e:
-        logger.error(f"Fout in Skyline: {e}")
-        await update.message.reply_text(f"⚠️ Fout bij ophalen data: `{e}`")
+        await update.message.reply_text(f"⚠️ Fout: {e}")
 
 async def trade_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handelt trades af via de Architect engine."""
     if update.effective_user.id != OWNER_ID: return
-    # ... (rest van je trade logica blijft hetzelfde)
+    
+    if len(context.args) < 2:
+        await update.message.reply_text("❌ Gebruik: `/trade [adres] [eth]`")
+        return
 
-# --- 5. RUNNER (Gefixt voor stabiliteit) ---
+    # Directe feedback
+    status_msg = await update.message.reply_text("🏗️ **Architect bouwt UserOp...**")
+    
+    try:
+        token_addr = w3.to_checksum_address(context.args[0])
+        eth_amt = float(context.args[1].replace(',', '.'))
+        
+        await status_msg.edit_text("🛰️ **UserOp voorbereiden & Sponsoring...**")
+        
+        router_abi = [{"inputs":[{"name":"amountOutMin","type":"uint256"},{"name":"routes","type":"tuple[]","components":[{"name":"from","type":"address"},{"name":"to","type":"address"},{"name":"stable","type":"bool"},{"name":"factory","type":"address"}]},{"name":"to","type":"address"},{"name":"deadline","type":"uint256"}],"name":"swapExactETHForTokens","outputs":[{"name":"amounts","type":"uint256[]"}],"stateMutability":"payable","type":"function"}]
+        router = w3.eth.contract(address=AERODROME_ROUTER, abi=router_abi)
+        
+        # Standaard route via Aerodrome
+        route = [{"from": WETH, "to": token_addr, "stable": False, "factory": "0x4200000000000000000000000000000000000001"}]
+        
+        call_data = router.encode_abi("swapExactETHForTokens", args=[
+            0, # slippage negeren voor test
+            route, 
+            await get_smart_vault_address(), 
+            int(time.time()) + 600
+        ])
+        
+        op_hash = await send_user_operation(call_data, AERODROME_ROUTER, value=w3.to_wei(eth_amt, 'ether'))
+        await status_msg.edit_text(f"🚀 **Verzonden!**\n\nUserOp Hash: `{op_hash}`")
+        
+    except Exception as e:
+        logger.error(f"Trade Error: {e}")
+        await status_msg.edit_text(f"⚠️ **Architect Error:** `{str(e)}`")
+
+# --- 5. RUNNER ---
 
 async def run_bot():
     try:
         app_tg = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
-        
-        # Handlers toevoegen
         app_tg.add_handler(CommandHandler("trade", trade_command))
         app_tg.add_handler(CommandHandler("skyline", skyline_report))
         
-        logger.info("Bot initialiseren...")
         await app_tg.initialize()
         await app_tg.start()
-        
-        # We halen 'drop_pending_updates' weg zodat hij ook reageert op berichten 
-        # die gestuurd zijn terwijl hij opstartte.
         await app_tg.updater.start_polling()
-        logger.info("🚀 Synthora Engine is nu live op Telegram.")
+        logger.info("🚀 Synthora Engine is nu live.")
         
-        # Houd de loop levend zonder de CPU te overbelasten
         while True:
             await asyncio.sleep(3600)
-            
     except Exception as e:
-        logger.error(f"FATAL: Bot loop onderbroken: {e}")
+        logger.error(f"Bot crash: {e}")
 
 @app.on_event("startup")
 async def startup_event():
-    # Start de bot in de achtergrond
     asyncio.create_task(run_bot())
-
-@app.get("/")
-async def health_check():
-    return {"status": "Synthora is running", "owner_id_loaded": OWNER_ID > 0}
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 10000))
     uvicorn.run(app, host="0.0.0.0", port=port)
-        
+    
