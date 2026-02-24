@@ -471,5 +471,6 @@ async def sell_token(token: str, reden: str):
 
         del positions[token]
 
-        await notify(
-            f"{emoji} *POSITIE GESLOTEN - {reden}*\n\n
+        _pnl   = stats["total_pnl"]
+        _snipe = config["snipe_eth"]
+   
