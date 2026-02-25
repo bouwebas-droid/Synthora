@@ -485,10 +485,11 @@ async def scan_new_pools():
                     if not t0 or not pool:
                         continue
                     blk = int(log.get("blockNumber", hex(current)), 16) if isinstance(log.get("blockNumber"), str) else log.get("blockNumber", current)
-                    if t1.lower() == WETH.lower():
-                        tasks.append(process_new_token(t0, pool, blk))
-                    elif t0.lower() == WETH.lower():
-                        tasks.append(process_new_token(t1, pool, blk))
+                    base_tokens = [WETH.lower(), USDC.lower()]
+                        if t0.lower() in base_tokens:
+                            tasks.append(process_new_token(t1, pool, blk))
+                        elif t1.lower() in base_tokens:
+                            tasks.append(process_new_token(t0, pool, blk))
                 if tasks:
                     await asyncio.gather(*tasks)
             last_block = current
