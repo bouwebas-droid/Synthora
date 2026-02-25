@@ -1,9 +1,12 @@
 # -*- coding: utf-8 -*-
 # =============================================================
-#  SYNTHORA V4.7 - FINAL AUTOMATOR
-#  Base Mainnet | Aerodrome | Auto-Blacklist | Full Execution
+#  SYNTHORA V4.7.2 - THE FINAL ARCHITECT (2026)
+#  Base Mainnet | Aerodrome | Multi-Token | Fully Automated
 # =============================================================
 import logging, os, asyncio, time, json, aiohttp, io
+import pandas as pd
+import plotly.graph_objects as go
+from datetime import datetime
 from web3 import Web3, AsyncWeb3
 from web3.providers import AsyncHTTPProvider
 from eth_account import Account
@@ -12,7 +15,7 @@ from fastapi import FastAPI, responses
 import uvicorn
 
 # --- LOGGER & CONFIG ---
-logging.basicConfig(format="%(asctime)s [SYSTEM] %(message)s", level=logging.INFO)
+logging.basicConfig(format="%(asctime)s [WINGMAN] %(message)s", level=logging.INFO)
 logger = logging.getLogger("Synthora")
 app = FastAPI()
 
@@ -34,8 +37,9 @@ config = {
     "take_profit_pct": 45.0, "hard_stop_pct": 20.0,
     "min_liquidity_eth": 1.0, "slippage_bps": 300, "balance_guard": 0.005
 }
-positions, blacklist = {}, set()
-stats = {"trades": 0, "wins": 0, "losses": 0, "total_pnl": 0.0}
+positions = {}
+blacklist = set()
+stats = {"trades": 0, "wins": 0, "losses": 0, "total_pnl": 0.0, "pnl_history": [], "started": time.time()}
 
 # Wallet & Web3 Connection
 raw_key = os.environ.get("ARCHITECT_SESSION_KEY", "").strip().replace('"', "")
@@ -45,39 +49,33 @@ OWNER_ID = int(os.environ.get("OWNER_ID", 0))
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
 tg_app = None
 
-# --- CORE UTILITIES ---
+# --- PERSISTENCE LOGICA ---
 
 def save_state():
     try:
         data = {"positions": positions, "stats": stats, "config": config, "blacklist": list(blacklist)}
         with open(STATE_FILE, "w") as f:
             json.dump(data, f, indent=4)
-    except Exception as e: logger.error(f"State save error: {e}")
+    except Exception as e: logger.error(f"Save error: {e}")
+
+def load_state():
+    global positions, stats, config, blacklist
+    if os.path.exists(STATE_FILE):
+        try:
+            with open(STATE_FILE, "r") as f:
+                d = json.load(f)
+                positions.update(d.get("positions", {}))
+                stats.update(d.get("stats", {}))
+                config.update(d.get("config", {}))
+                bl_list = d.get("blacklist", [])
+                for item in bl_list: blacklist.add(item)
+                logger.info("🤜 Wingman geheugen succesvol geladen.")
+        except Exception as e: logger.error(f"Load error: {e}")
 
 async def notify(msg):
     if tg_app and OWNER_ID:
         try: await tg_app.bot.send_message(chat_id=OWNER_ID, text=msg, parse_mode="Markdown")
         except: pass
-
-# --- AUTO-BLACKLIST LOGIC ---
-
-async def monitor_liquidity_health(token_address, delay=300):
-    """Controleert na X seconden of de liquiditeit nog aanwezig is."""
-    await asyncio.sleep(delay)
-    try:
-        router = aw3.eth.contract(address=AERODROME_ROUTER, abi=ROUTER_ABI)
-        routes = [{"from": WETH, "to": token_address, "stable": False, "factory": AERODROME_FACTORY}]
-        # Test met een kleine hoeveelheid om liquiditeit te verifiëren
-        amounts = await router.functions.getAmountsOut(Web3.to_wei(0.001, 'ether'), routes).call()
-        
-        if amounts[-1] <= 0:
-            blacklist.add(token_address)
-            logger.warning(f"🚫 Token {token_address} geblacklist: Geen liquiditeit gevonden na 5 min.")
-            await notify(f"🚫 **Auto-Blacklist:** `{token_address[:12]}` verwijderd wegens gebrek aan liquiditeit.")
-            save_state()
-    except Exception:
-        blacklist.add(token_address)
-        save_state()
 
 # --- TRADING ACTIONS ---
 
@@ -91,7 +89,7 @@ async def execute_approve(token_address):
         })
         signed = aw3.eth.account.sign_transaction(tx, raw_key)
         await aw3.eth.send_raw_transaction(signed.rawTransaction)
-        logger.info(f"🔓 Approval geslaagd voor {token_address[:10]}")
+        logger.info(f"🔓 {token_address[:10]} goedgekeurd.")
     except Exception as e: logger.error(f"Approve error: {e}")
 
 async def execute_sell(token_address, reason):
@@ -112,9 +110,9 @@ async def execute_sell(token_address, reason):
             'maxFeePerGas': await aw3.eth.gas_price, 'maxPriorityFeePerGas': Web3.to_wei(1, 'gwei')
         })
         signed = aw3.eth.account.sign_transaction(tx, raw_key)
-        tx_hash = await aw3.eth.send_raw_transaction(signed.rawTransaction)
+        await aw3.eth.send_raw_transaction(signed.rawTransaction)
         
-        await notify(f"💰 **Verkoop Uitgevoerd**\nToken: `{token_address[:12]}`\nReden: `{reason}`")
+        await notify(f"💰 **VERKOCHT!**\nReden: `{reason}`\nToken: `{token_address[:12]}`")
         del positions[token_address]
         stats["trades"] += 1
         save_state()
@@ -133,7 +131,7 @@ async def execute_buy(token_address):
             0, routes, signer.address, int(time.time()) + 60
         ).build_transaction({
             'from': signer.address, 'value': Web3.to_wei(config["snipe_eth"], 'ether'),
-            'nonce': nonce, 'gas': 300000, 'chainId': 8453,
+            'nonce': nonce, 'gas': 350000, 'chainId': 8453,
             'maxFeePerGas': await aw3.eth.gas_price, 'maxPriorityFeePerGas': Web3.to_wei(1, 'gwei')
         })
         signed = aw3.eth.account.sign_transaction(tx, raw_key)
@@ -144,12 +142,8 @@ async def execute_buy(token_address):
             token_contract = aw3.eth.contract(address=token_address, abi=ERC20_ABI)
             bal = await token_contract.functions.balanceOf(signer.address).call()
             positions[token_address] = {"entry_eth": config["snipe_eth"], "token_amount": bal, "time": time.time()}
-            
-            # Start achtergrondtaken
             asyncio.create_task(execute_approve(token_address))
-            asyncio.create_task(monitor_liquidity_health(token_address))
-            
-            await notify(f"🚀 **Snipe Succesvol**\nToken: `{token_address[:12]}`\nMonitoring gestart.")
+            await notify(f"🚀 **SNIPE RAAK!**\nToken: `{token_address[:12]}`")
             save_state()
     except Exception as e: logger.error(f"Buy error: {e}")
 
@@ -189,33 +183,41 @@ async def scan_loop():
             await asyncio.sleep(1)
         except: await asyncio.sleep(2)
 
-# --- BOOTSTRAP ---
-
-# --- TELEGRAM COMMAND FUNCTIES (BUGFREE) ---
+# --- TELEGRAM HANDLERS ---
 
 async def handle_start(update, context):
     if update.effective_user.id != OWNER_ID: return
-    config['active'] = True  # Gefixt: Dictionary syntax
+    config["active"] = True
     save_state()
     await update.message.reply_text("🚀 **Guardian geactiveerd.** De jacht op Base is geopend.")
 
 async def handle_wallet(update, context):
     if update.effective_user.id != OWNER_ID: return
-    # Gefixt: 'await' toegevoegd voor get_balance
     bal = await aw3.eth.get_balance(signer.address)
     eth_bal = Web3.from_wei(bal, 'ether')
     await update.message.reply_text(f"💳 **Balans:** `{eth_bal:.4f} ETH`", parse_mode="Markdown")
+
+async def cmd_positions(u, c):
+    if u.effective_user.id != OWNER_ID: return
+    if not positions: return await u.message.reply_text("Geen open posities.")
+    msg = "🛰️ **Live Portfolio Matrix:**\n"
+    for addr, pos in positions.items(): msg += f"- `{addr[:10]}` | Inzet: `{pos['entry_eth']} ETH`\n"
+    await u.message.reply_text(msg, parse_mode="Markdown")
+
+async def cmd_skyline(u, c):
+    if u.effective_user.id != OWNER_ID: return
+    msg = "🏙 **THE SKYLINE REPORT**\n"
+    msg += f"PnL: `{stats['total_pnl']:.4f} ETH` | Trades: `{stats['trades']}`"
+    await u.message.reply_text(msg, parse_mode="Markdown")
 
 # --- BOOTSTRAP ---
 
 @app.on_event("startup")
 async def startup():
     global tg_app
-    load_state() # Zorg dat we de laatste state laden
+    load_state() # Nu correct gedefinieerd vóór aanroep
     
     tg_app = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
-    
-    # Gebruik echte functies in plaats van lambdas voor stabiliteit
     tg_app.add_handler(CommandHandler("start", handle_start))
     tg_app.add_handler(CommandHandler("wallet", handle_wallet))
     tg_app.add_handler(CommandHandler("positions", cmd_positions))
@@ -227,7 +229,12 @@ async def startup():
     
     asyncio.create_task(monitor_loop())
     asyncio.create_task(scan_loop())
-    
-    logger.info("🤜 Guardian V4.7.1 is 100% operationeel.")
-    await notify("🏗 **Architect Online.** De machine is nu foutloos.")
+    logger.info("🤜 Synthora V4.7.2 is 100% operationeel.")
+    await notify("🏗 **Architect Online.** Saldo bewaakt.")
 
+@app.get("/")
+async def health(): return {"status": "ok"}
+
+if __name__ == "__main__":
+    uvicorn.run(app, host="0.0.0.0", port=int(os.environ.get("PORT", 10000)))
+            
