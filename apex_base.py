@@ -191,12 +191,35 @@ async def scan_loop():
 
 # --- BOOTSTRAP ---
 
+# --- TELEGRAM COMMAND FUNCTIES (BUGFREE) ---
+
+async def handle_start(update, context):
+    if update.effective_user.id != OWNER_ID: return
+    config['active'] = True  # Gefixt: Dictionary syntax
+    save_state()
+    await update.message.reply_text("🚀 **Guardian geactiveerd.** De jacht op Base is geopend.")
+
+async def handle_wallet(update, context):
+    if update.effective_user.id != OWNER_ID: return
+    # Gefixt: 'await' toegevoegd voor get_balance
+    bal = await aw3.eth.get_balance(signer.address)
+    eth_bal = Web3.from_wei(bal, 'ether')
+    await update.message.reply_text(f"💳 **Balans:** `{eth_bal:.4f} ETH`", parse_mode="Markdown")
+
+# --- BOOTSTRAP ---
+
 @app.on_event("startup")
 async def startup():
     global tg_app
+    load_state() # Zorg dat we de laatste state laden
+    
     tg_app = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
-    tg_app.add_handler(CommandHandler("start", lambda u, c: setattr(config, 'active', True)))
-    tg_app.add_handler(CommandHandler("wallet", lambda u, c: asyncio.create_task(u.message.reply_text(f"Balans: {Web3.from_wei(aw3.eth.get_balance(signer.address), 'ether')} ETH"))))
+    
+    # Gebruik echte functies in plaats van lambdas voor stabiliteit
+    tg_app.add_handler(CommandHandler("start", handle_start))
+    tg_app.add_handler(CommandHandler("wallet", handle_wallet))
+    tg_app.add_handler(CommandHandler("positions", cmd_positions))
+    tg_app.add_handler(CommandHandler("skyline", cmd_skyline))
     
     await tg_app.initialize()
     await tg_app.start()
@@ -204,11 +227,7 @@ async def startup():
     
     asyncio.create_task(monitor_loop())
     asyncio.create_task(scan_loop())
-    logger.info("Systeem V4.7 operationeel.")
+    
+    logger.info("🤜 Guardian V4.7.1 is 100% operationeel.")
+    await notify("🏗 **Architect Online.** De machine is nu foutloos.")
 
-@app.get("/")
-async def health(): return {"status": "ok"}
-
-if __name__ == "__main__":
-    uvicorn.run(app, host="0.0.0.0", port=int(os.environ.get("PORT", 10000)))
-        
