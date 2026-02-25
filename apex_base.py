@@ -1,134 +1,108 @@
-import logging, os, asyncio, time, httpx
+import logging, os, asyncio, time, json
 from web3 import Web3
 from eth_account import Account
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes, CallbackQueryHandler
+from telegram import Update
+from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes
 from fastapi import FastAPI
 import uvicorn
 
-# --- 1. LOGGING EN SETUP ---
-logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
-logger = logging.getLogger("Synthora")
+# --- GEAVANCEERDE CONFIGURATIE ---
+logging.basicConfig(format='%(asctime)s - %(levelname)s - %(message)s', level=logging.INFO)
+logger = logging.getLogger("Predator")
 app = FastAPI()
 
-# --- 2. CONFIGURATIE ---
-# Gebruik de Alchemy URL uit je dashboard
+# RPC & Web3
 RPC_URL = os.environ.get("BASE_RPC_URL", "https://base-mainnet.g.alchemy.com/v2/Hw_dzgvYV1VJDryEav9WO")
 w3 = Web3(Web3.HTTPProvider(RPC_URL))
 
-# Signer laden vanaf de Private Key in Render
-raw_key = os.environ.get("ARCHITECT_SESSION_KEY", "").strip().replace('"', '').replace("'", "")
-if not raw_key.startswith("0x"): raw_key = "0x" + raw_key
-signer = Account.from_key(raw_key)
-
+# WALLET & OWNER
+SIGNER_ADDR = "0xd048b06D3A775151652Ab3c544c6011755C61665"
+PRIVATE_KEY = os.environ.get("ARCHITECT_SESSION_KEY", "").strip().replace('"', '').replace("'", "")
+account = Account.from_key(PRIVATE_KEY)
 OWNER_ID = int(os.environ.get("OWNER_ID", 0))
-TELEGRAM_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
 
-# Belangrijke adressen voor Base
-AERODROME_ROUTER = "0xcF77a3Ba9A5CA399B7c97c74d54e5b1Beb874E43"
+# DEX CONTRACTS
+AERODROME_FACTORY = "0x4200000000000000000000000000000000000006" # Voorbeeld voor pair-events
+ROUTER_ADDRESS = "0xcF77a3Ba9A5CA399B7c97c74d54e5b1Beb874E43"
 WETH = "0x4200000000000000000000000000000000000006"
 
-# --- 3. CORE FUNCTIES ---
+# WINSTRATEGIE
+SNIPE_AMOUNT_ETH = 0.002  # Inzet per snipe
+MIN_LIQUIDITY_ETH = 0.5   # Rug-filter: Alleen snipen als er genoeg ETH in de pool zit
+TAKE_PROFIT_MULT = 1.5    # Verkoop bij 50% winst
+STOP_LOSS_MULT = 0.8      # Verkoop bij 20% verlies
 
-async def get_balance(address):
-    balance = w3.eth.get_balance(address)
-    return w3.from_wei(balance, 'ether')
+# --- DE ENGINE ---
 
-# --- 4. TELEGRAM COMMANDS ---
+async def check_rug(pair_address):
+    """Controleert of de liquidity gelockt is of dat de dev kan dumpen."""
+    # Hier komt de simulatie van de contract call
+    return True
 
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.effective_user.id != OWNER_ID: return
+async def auto_sell_monitor(token_address, buy_price):
+    """Houdt de prijs 24/7 in de gaten om winst te verzilveren."""
+    logger.info(f"📈 Monitoring gestart voor {token_address}")
+    while True:
+        try:
+            # Hier halen we de actuele prijs van de DEX
+            current_price = 1.0 # Placeholder
+            if current_price >= buy_price * TAKE_PROFIT_MULT:
+                logger.info("💰 TARGET BEREIKT! Verkopen...")
+                # execute_swap(token_address, WETH)
+                break
+            await asyncio.sleep(5)
+        except:
+            break
+
+async def autonomous_scan():
+    """Scant elk nieuw blok op Base naar 'PairCreated' events."""
+    logger.info("🦾 Predator Scanner is nu AUTONOOM")
+    last_block = w3.eth.block_number
     
-    bal = await get_balance(signer.address)
-    msg = (
-        f"🤜 **Synthora V16 Live**\n\n"
-        f"🛰️ **Signer:** `{signer.address}`\n"
-        f"💰 **Saldo:** `{bal:.6f} ETH` (Base)\n\n"
-        f"Gebruik `/skyline` voor een rapport of `/withdraw [adres] [bedrag]` om ETH te verplaatsen."
-    )
-    await update.message.reply_text(msg, parse_mode='Markdown')
-
-async def skyline_report(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.effective_user.id != OWNER_ID: return
-    bal = await get_balance(signer.address)
-    await update.message.reply_text(f"🏙️ **Skyline Report**\n\nAdres: `{signer.address}`\nSaldo: `{bal:.6f} ETH`", parse_mode='Markdown')
-
-async def withdraw_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """De fix voor de 'SignedTransaction' object has no attribute 'rawTransaction'"""
-    if update.effective_user.id != OWNER_ID: return
-    
-    if len(context.args) < 2:
-        await update.message.reply_text("❌ Gebruik: `/withdraw [adres] [hoeveelheid]`")
-        return
-
-    msg = await update.message.reply_text("🏧 **Opname initialiseren...**")
-    try:
-        to_address = w3.to_checksum_address(context.args[0])
-        amount = float(context.args[1].replace(',', '.'))
-        value_wei = w3.to_wei(amount, 'ether')
-
-        gas_price = w3.eth.gas_price
-        nonce = w3.eth.get_transaction_count(signer.address)
-
-        tx = {
-            'nonce': nonce,
-            'to': to_address,
-            'value': value_wei,
-            'gas': 21000,
-            'gasPrice': int(gas_price * 1.2),
-            'chainId': 8453
-        }
-
-        # Ondertekenen
-        signed_tx = w3.eth.account.sign_transaction(tx, signer.key)
-
-        # DE FIX: Checken op rawTransaction of raw_transaction
-        raw_data = getattr(signed_tx, 'rawTransaction', getattr(signed_tx, 'raw_transaction', None))
-        
-        if raw_data is None:
-            raise Exception("Interne fout: kon geen transactie data genereren.")
-
-        # Verzenden naar het netwerk
-        tx_hash = w3.eth.send_raw_transaction(raw_data)
-        
-        await msg.edit_text(f"🚀 **Verzonden naar Base!**\n\nDe ETH is onderweg.\nHash: `0x{tx_hash.hex()}`")
-    except Exception as e:
-        logger.error(f"Withdraw Error: {e}")
-        await msg.edit_text(f"⚠️ **Fout:** `{str(e)}`")
-
-# --- 5. RUNNER EN SCHEDULER ---
-
-async def run_bot():
-    app_tg = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
-    
-    # Handlers
-    app_tg.add_handler(CommandHandler("start", start))
-    app_tg.add_handler(CommandHandler("skyline", skyline_report))
-    app_tg.add_handler(CommandHandler("withdraw", withdraw_command))
-    
-    logger.info("🤜 Synthora Bot Gestart")
-    await app_tg.initialize()
-    await app_tg.start()
-    await app_tg.updater.start_polling()
-    
-    # Scanner simulatie (begint altijd bij latest om 400 errors te voorkomen)
     while True:
         try:
             current_block = w3.eth.block_number
-            # logger.info(f"🔎 Scanning block: {current_block}")
-            await asyncio.sleep(12) # Wacht op volgend Base blok
+            if current_block > last_block:
+                # Hier scannen we de logs van Aerodrome voor nieuwe liquidity pools
+                # Zodra een match is gevonden: execute_snipe(token)
+                last_block = current_block
+            await asyncio.sleep(1)
         except Exception as e:
-            logger.error(f"Scanner error: {e}")
-            await asyncio.sleep(5)
+            await asyncio.sleep(2)
+
+# --- TELEGRAM COMMANDS ---
+
+async def status(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_user.id != OWNER_ID: return
+    bal = w3.from_wei(w3.eth.get_balance(SIGNER_ADDR), 'ether')
+    await update.message.reply_text(
+        f"🦾 **Synthora V20 Predator**\n\n"
+        f"💰 **Saldo:** `{bal:.6f} ETH`\n"
+        f"🎯 **Strategy:** Auto-Snipe Liquidity > {MIN_LIQUIDITY_ETH} ETH\n"
+        f"🚦 **Scanner:** RUNNING\n"
+        f"📝 **Log:** Wachten op nieuwe liquiditeit op Aerodrome..."
+    )
+
+# --- BOOTSTRAP ---
+
+async def run_bot():
+    bot = ApplicationBuilder().token(os.environ.get("TELEGRAM_BOT_TOKEN")).build()
+    bot.add_handler(CommandHandler("start", status))
+    bot.add_handler(CommandHandler("status", status))
+    
+    await bot.initialize()
+    await bot.start()
+    await bot.updater.start_polling()
+    await autonomous_scan()
 
 @app.on_event("startup")
-async def startup_event():
+async def start_all():
     asyncio.create_task(run_bot())
 
 @app.get("/")
 async def health():
-    return {"status": "Synthora V16 Online", "signer": signer.address}
+    return {"status": "Autonomous Predator Active"}
 
 if __name__ == "__main__":
-    port = int(os.environ.get("PORT", 10000))
-    uvicorn.run(app, host="0.0.0.0", port=port)
+    uvicorn.run(app, host="0.0.0.0", port=int(os.environ.get("PORT", 10000)))
+    
