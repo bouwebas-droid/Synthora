@@ -1,0 +1,23 @@
+services:
+  - type: web
+    name: synthora-elite
+    env: python
+    region: frankfurt
+    plan: free
+    buildCommand: "pip install --upgrade pip && pip install -r requirements.txt"
+    startCommand: "python Apex_base.py"
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.11.0
+      - key: OPENAI_API_KEY
+        sync: false
+      - key: TELEGRAM_TOKEN
+        sync: false
+      - key: ALCHEMY_API_KEY
+        sync: false
+      - key: PRIVATE_KEY
+        sync: false
+      - key: CONTRACT_ADDRESS
+        sync: false
+      - key: ROUTER_ADDRESS
+        sync: false
