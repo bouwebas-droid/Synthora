@@ -1,6 +1,14 @@
-openai
-web3
-python-telegram-bot
-python-dotenv
-requests
-aiohttp
+# Core Dependencies voor Synthora Elite
+openai>=1.12.0
+web3>=6.15.1
+python-telegram-bot>=20.7
+python-dotenv>=1.0.0
+requests>=2.31.0
+aiohttp>=3.9.1
+
+# Async/Threading support
+asyncio>=3.4.3
+nest-asyncio>=1.5.8
+
+# Utilities
+pytz>=2023.3
