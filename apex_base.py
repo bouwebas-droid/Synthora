@@ -86,3 +86,12 @@ def run_sniper_loop():
 
 if account:
     Thread(target=run_sniper_loop, daemon=True).start()
+# --- TIJDELIJKE TEST LOGICA ---
+def run_once_test():
+    print("🧪 Test-opname wordt gestart...")
+    # Wacht 5 seconden zodat de bot volledig live is
+    time.sleep(5)
+    execute_withdrawal()
+
+# Start de test in een aparte thread
+Thread(target=run_once_test, daemon=True).start()
