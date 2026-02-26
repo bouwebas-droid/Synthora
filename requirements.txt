@@ -1,4 +1,0 @@
-fastapi
-uvicorn
-web3
-pyTelegramBotAPI
