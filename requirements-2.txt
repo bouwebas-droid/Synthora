@@ -1,0 +1,14 @@
+# Web Framework
+fastapi==0.109.0
+uvicorn[standard]==0.27.0
+
+# Blockchain
+web3==6.15.1
+eth-account==0.10.0
+
+# Telegram
+pyTelegramBotAPI==4.14.1
+
+# Utilities
+python-dotenv==1.0.0
+requests==2.31.0
