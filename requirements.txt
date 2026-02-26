@@ -1,4 +1,6 @@
-web3
-pyTelegramBotAPI
-requests
 openai
+web3
+python-telegram-bot
+python-dotenv
+requests
+aiohttp
