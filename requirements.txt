@@ -1,4 +1,4 @@
 web3
 pyTelegramBotAPI
 requests
-python-dotenv
+openai
