@@ -72,7 +72,7 @@ class BotState:
         self.total_pnl_eth = 0.0
 
 state = BotState()
-
+config = Config()
 # ============================================
 # SYNTHORA AI & DATA LOGIC
 # ============================================
